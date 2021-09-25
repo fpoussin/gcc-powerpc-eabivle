@@ -1,0 +1,113 @@
+diff --git a/bfd/elf32-ppc.c b/bfd/elf32-ppc.c
+index 6c23d0d..53961a3 100644
+--- a/bfd/elf32-ppc.c
++++ b/bfd/elf32-ppc.c
+@@ -171,6 +171,9 @@ static const bfd_vma ppc_elf_vxworks_pic_plt0_entry
+ #define NOP		0x60000000
+ #define SUB_11_11_12	0x7d6c5850
+
++/* VLE some instructions */
++#define E_B		0x78000000
++
+ /* Offset of tp and dtp pointers from start of TLS block.  */
+ #define TP_OFFSET	0x7000
+ #define DTP_OFFSET	0x8000
+@@ -1444,6 +1447,21 @@ static reloc_howto_type ppc_elf_howto_raw[] = {
+ 	 0x1fffffe,		/* dst_mask */
+ 	 TRUE),			/* pcrel_offset */
+ 
++  /* A relative 24 bit branch.  */
++  HOWTO (R_PPC_VLE_PLTREL24,	/* type */
++	 1,			/* rightshift */
++	 2,			/* size (0 = byte, 1 = short, 2 = long) */
++	 24,			/* bitsize */
++	 TRUE,			/* pc_relative */
++	 1,			/* bitpos */
++	 complain_overflow_signed, /* complain_on_overflow */
++	 ppc_elf_unhandled_reloc, /* special_function */
++	 "R_PPC_VLE_PLTREL24",	/* name */
++	 FALSE,			/* partial_inplace */
++	 0,			/* src_mask */
++	 0x1fffffe,		/* dst_mask */
++	 TRUE),			/* pcrel_offset */
++
+   /* The 16 LSBS in split16a format.  */
+   HOWTO (R_PPC_VLE_LO16A,	/* type */
+ 	 0,			/* rightshift */
+@@ -4320,6 +4338,7 @@ ppc_elf_check_relocs (bfd *abfd,
+ 	  break;
+ 
+ 	case R_PPC_PLTREL24:
++	case R_PPC_VLE_PLTREL24:
+ 	  if (h == NULL)
+ 	    break;
+ 	  /* Fall through */
+@@ -7484,10 +7503,21 @@ ppc_elf_relax_section (bfd *abfd,
+ 	    case R_PPC_REL24:
+ 	    case R_PPC_LOCAL24PC:
+ 	    case R_PPC_PLTREL24:
+-	      t0 = bfd_get_32 (abfd, hit_addr);
+-	      t0 &= ~0x3fffffc;
+-	      t0 |= val & 0x3fffffc;
+-	      bfd_put_32 (abfd, t0, hit_addr);
++	      if (r_type == R_PPC_PLTREL24
++		  && (elf_section_flags (isec) & SHF_PPC_VLE) != 0)
++		{
++		  t0 = bfd_get_32 (abfd, hit_addr);
++		  t0 &= ~0x01fffffe;
++		  t0 |= val & 0x01fffffe;
++		  bfd_put_32 (abfd, t0, hit_addr);
++		}
++	      else
++		{
++		  t0 = bfd_get_32 (abfd, hit_addr);
++		  t0 &= ~0x3fffffc;
++		  t0 |= val & 0x3fffffc;
++		  bfd_put_32 (abfd, t0, hit_addr);
++		}
+ 	      break;
+ 
+ 	    case R_PPC_REL14:
+@@ -9928,6 +9958,13 @@ ppc_elf_relocate_section (bfd *output_bfd,
+ 	  
+ 	  if (r == bfd_reloc_ok)
+ 	    {
++	      if ((elf_section_flags (input_section) & SHF_PPC_VLE) != 0)
++		{
++		  if (howto == ppc_elf_howto_table[R_PPC_PLTREL24])
++		    howto = ppc_elf_howto_table[R_PPC_VLE_PLTREL24];
++		  else if (howto == ppc_elf_howto_table[R_PPC_LOCAL24PC])
++		    howto = ppc_elf_howto_table[R_PPC_VLE_REL24];
++		}
+ 	      r = _bfd_final_link_relocate (howto, input_bfd, input_section, contents,
+ 					    rel->r_offset, relocation, addend);
+ 	    }
+@@ -10007,8 +10044,15 @@ Please change address of '%s' or use 'no-e200z425-rel-error' option to disable t
+       && (strcmp (input_section->output_section->name, ".init") == 0
+ 	  || strcmp (input_section->output_section->name, ".fini") == 0))
+     {
++      unsigned int insn;
++
++      if ((elf_section_flags (input_section) & SHF_PPC_VLE) == 0)
++	insn = B;
++      else
++	insn = E_B;
++
+       /* Branch around the trampolines.  */
+-      unsigned int insn = B + input_section->size - input_section->rawsize;
++      insn += input_section->size - input_section->rawsize;
+       bfd_put_32 (input_bfd, insn, contents + input_section->rawsize);
+     }
+ 
+diff --git a/include/elf/ppc.h b/include/elf/ppc.h
+index 7340c6e..eac6f59 100644
+--- a/include/elf/ppc.h
++++ b/include/elf/ppc.h
+@@ -82,6 +82,7 @@ START_RELOC_NUMBERS (elf_ppc_reloc_type)
+   RELOC_NUMBER (R_PPC_VLE_RELAX,	 51)
+ /* Reloc only used internally by gas.  As above, value is unimportant.  */
+   RELOC_NUMBER (R_PPC_16DX_HA,		 52)
++  RELOC_NUMBER (R_PPC_VLE_PLTREL24,	 53)
+ #endif
+ 
+   /* Relocs added to support TLS.  */

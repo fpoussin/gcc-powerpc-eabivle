@@ -1,0 +1,11 @@
+--- src_gcc/gcc/config/rs6000/extelim.c	2017-01-03 16:50:09.764182880 -0600
++++ src_gcc/gcc/config/rs6000/extelim.c-new	2017-01-03 16:49:41.061183384 -0600
+@@ -3103,7 +3103,7 @@
+   int i;
+ 
+   if (GET_CODE (rtn) != SET)
+-    return false;
++    return NULL;
+ 
+   dest = SET_DEST (rtn);
+ 

@@ -1,0 +1,39 @@
+diff -ruN gcc-4.9.4-orig/gcc/config/rs6000/t-e200SD gcc-4.9.4/gcc/config/rs6000/t-e200SD
+--- gcc-4.9.4-orig/gcc/config/rs6000/t-e200SD	1969-12-31 18:00:00.000000000 -0600
++++ gcc-4.9.4/gcc/config/rs6000/t-e200SD	2017-04-26 12:52:19.188238277 -0500
+@@ -0,0 +1,19 @@
++# Multilibs for powerpc e200 embedded ELF targets.
++# Note: "fshort-double" "spfp" "fshort-double fshort-double/*" removed because it is not available in fortran
++# What we really want are these variants:
++#	-mcpu=e200z[023467]
++#	-mcpu=e200z[023467] -fshort-double
++#	-mcpu=e200z[023467] -msoft-float
++#	-mcpu=e200z[3467] -mspe (and -mspe2)
++# so we'll need to create exceptions later below.
++
++MULTILIB_OPTIONS    = mcpu=e200z2/mcpu=e200z3/mcpu=e200z4/mcpu=e200z6/mcpu=e200z7 mhard-float fshort-double mspe mno-vle
++
++MULTILIB_DIRNAMES	= e200z2 e200z3 e200z4 e200z6 e200z7 fp spfp spe booke
++
++MULTILIB_EXTRA_OPTS	= mstrict-align
++
++MULTILIB_EXCEPTIONS	= mhard-float mhard-float/* fshort-double fshort-double/* mspe mspe/* mno-vle mno-vle/* \
++			  mcpu=e200z2/*mspe* mcpu=e200z[23467]/fshort-double*
++
++MULTILIB_MATCHES	= mspe=mspe2
+diff -ruN gcc-4.9.4-orig/gcc/config.gcc gcc-4.9.4/gcc/config.gcc
+--- gcc-4.9.4-orig/gcc/config.gcc	2017-04-26 10:15:42.792899782 -0500
++++ gcc-4.9.4/gcc/config.gcc	2017-04-26 10:18:00.560890083 -0500
+@@ -2278,7 +2278,11 @@
+ powerpc-*-eabivle)
+ 	tm_file="${tm_file} elfos.h usegas.h freebsd-spec.h newlib-stdint.h rs6000/sysv4.h rs6000/singlefp.h rs6000/e200.h"
+ 	extra_options="${extra_options} rs6000/sysv4.opt"
+-	tmake_file="rs6000/t-e200"
++	if test x$enable_e200_short_double = xyes; then
++	  tmake_file="rs6000/t-e200SD"
++	else
++	  tmake_file="rs6000/t-e200"
++	fi
+ 	use_gcc_stdint=wrap
+ 	;;
+ powerpc-*-eabi*)

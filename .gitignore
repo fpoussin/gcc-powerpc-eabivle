@@ -1,0 +1,6 @@
+archives/*
+extracted/*
+build-*/*
+
+*.log
+

@@ -1,0 +1,54 @@
+diff -ruN gcc_DT/gcc/common.opt gcc-4.9.2-vle/gcc/common.opt
+--- gcc_DT/gcc/common.opt	2017-01-06 14:45:36.854762416 -0600
++++ gcc-4.9.2-vle/gcc/common.opt	2016-12-22 10:52:29.000000000 -0600
+@@ -603,6 +603,10 @@
+ Common Var(pedantic) Warning
+ Issue warnings needed for strict compliance to the standard
+ 
++Wpoison-system-directories
++Common Var(flag_poison_system_directories) Init(1) Warning
++Warn for -I and -L options using system directories if cross compiling
++
+ Wshadow
+ Common Var(warn_shadow) Warning
+ Warn when one local variable shadows another
+diff -ruN gcc_DT/gcc/gcc.c gcc-4.9.2-vle/gcc/gcc.c
+--- gcc_DT/gcc/gcc.c	2017-01-06 14:45:36.903762415 -0600
++++ gcc-4.9.2-vle/gcc/gcc.c	2016-12-22 10:52:29.000000000 -0600
+@@ -770,6 +770,8 @@
+    "%{fuse-ld=*:-fuse-ld=%*}\
+     %X %{o*} %{e*} %{N} %{n} %{r}\
+     %{s} %{t} %{u*} %{z} %{Z} %{!nostdlib:%{!nostartfiles:%S}} " VTABLE_VERIFICATION_SPEC " \
++    %{Wno-poison-system-directories:--no-poison-system-directories}\
++    %{Werror=poison-system-directories:--error-poison-system-directories}\
+     %{static:} %{L*} %(mfwrap) %(link_libgcc) " SANITIZER_EARLY_SPEC " %o\
+     %{fopenmp|ftree-parallelize-loops=*:%:include(libgomp.spec)%(link_gomp)}\
+     %{fcilkplus:%:include(libcilkrts.spec)%(link_cilkrts)}\
+diff -ruN gcc_DT/gcc/incpath.c gcc-4.9.2-vle/gcc/incpath.c
+--- gcc_DT/gcc/incpath.c	2017-01-06 14:45:36.927762414 -0600
++++ gcc-4.9.2-vle/gcc/incpath.c	2016-12-22 10:52:29.000000000 -0600
+@@ -382,6 +382,24 @@
+ 	}
+       fprintf (stderr, _("End of search list.\n"));
+     }
++
++#ifdef ENABLE_POISON_SYSTEM_DIRECTORIES
++  if (flag_poison_system_directories)
++    {
++	struct cpp_dir *p;
++
++	for (p = heads[QUOTE]; p; p = p->next)
++	  {
++	   if ((!strncmp (p->name, "/usr/include", 12))
++	       || (!strncmp (p->name, "/usr/local/include", 18)))
++	     warning (OPT_Wpoison_system_directories,
++		      "include location \"%s\" is unsafe for "
++		      "cross-compilation",
++		      p->name);
++	  }
++    }
++#endif
++
+ }
+ 
+ /* Use given -I paths for #include "..." but not #include <...>, and

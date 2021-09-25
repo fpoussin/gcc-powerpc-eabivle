@@ -1,0 +1,473 @@
+diff --git a/bfd/coffgen.c b/bfd/coffgen.c
+index a7d5e48..ace9500 100644
+--- a/bfd/coffgen.c
++++ b/bfd/coffgen.c
+@@ -2115,6 +2115,9 @@ coff_print_symbol (bfd *abfd,
+ 		      break;
+ 		    }
+ 		    /* Otherwise fall through.  */
++#if __GNUC__ >= 7
++		  __attribute__ ((fallthrough));
++#endif
+ 		case C_EXT:
+ 		case C_AIX_WEAKEXT:
+ 		  if (ISFCN (combined->u.syment.n_type))
+@@ -2135,6 +2138,9 @@ coff_print_symbol (bfd *abfd,
+ 		      break;
+ 		    }
+ 		  /* Otherwise fall through.  */
++#if __GNUC__ >= 7
++		  __attribute__ ((fallthrough));
++#endif
+ 		default:
+ 		  fprintf (file, "AUX lnno %d size 0x%x tagndx %ld",
+ 			   auxp->u.auxent.x_sym.x_misc.x_lnsz.x_lnno,
+diff --git a/bfd/elf.c b/bfd/elf.c
+index a772db0..81bae60 100644
+--- a/bfd/elf.c
++++ b/bfd/elf.c
+@@ -1596,6 +1596,9 @@ bfd_section_from_shdr (bfd *abfd, unsigned int shindex)
+ 		  || hdr->sh_link == ((SHN_LORESERVE + 1) & 0xffff) /* SHN_AFTER */)
+ 		break;
+ 	      /* Otherwise fall through.  */
++#if __GNUC__ >= 7
++	      __attribute__ ((fallthrough));
++#endif
+ 	    default:
+ 	      return FALSE;
+ 	    }
+diff --git a/bfd/elf32-ppc.c b/bfd/elf32-ppc.c
+index 689e640..8d22853 100644
+--- a/bfd/elf32-ppc.c
++++ b/bfd/elf32-ppc.c
+@@ -5058,6 +5058,9 @@ ppc_elf_gc_sweep_hook (bfd *abfd,
+ 	case R_PPC_UADDR16:
+ 	  if (info->shared)
+ 	    break;
++#if __GNUC__ >= 7
++	  __attribute__ ((fallthrough));
++#endif
+ 
+ 	case R_PPC_PLT32:
+ 	case R_PPC_PLTREL24:
+diff --git a/bfd/elf64-ppc.c b/bfd/elf64-ppc.c
+index 123a33a..777bdd8 100644
+--- a/bfd/elf64-ppc.c
++++ b/bfd/elf64-ppc.c
+@@ -5485,6 +5485,9 @@ ppc64_elf_check_relocs (bfd *abfd, struct bfd_link_info *info,
+ 	case R_PPC64_TOC16_DS:
+ 	  htab->do_multi_toc = 1;
+ 	  ppc64_elf_tdata (abfd)->has_small_toc_reloc = 1;
++#if __GNUC__ >= 7
++      __attribute__ ((fallthrough));
++#endif
+ 	case R_PPC64_TOC16_LO:
+ 	case R_PPC64_TOC16_HI:
+ 	case R_PPC64_TOC16_HA:
+@@ -12347,7 +12350,7 @@ ppc64_elf_size_stubs (struct bfd_link_info *info)
+ 	  if ((stub_sec->flags & SEC_LINKER_CREATED) == 0)
+ 	    stub_sec->size = ((stub_sec->size
+ 			       + (1 << htab->params->plt_stub_align) - 1)
+-			      & (-1 << htab->params->plt_stub_align));
++			      & -(1 << htab->params->plt_stub_align));
+ 
+       for (stub_sec = htab->params->stub_bfd->sections;
+ 	   stub_sec != NULL;
+@@ -12820,7 +12823,7 @@ ppc64_elf_build_stubs (struct bfd_link_info *info,
+       if ((stub_sec->flags & SEC_LINKER_CREATED) == 0)
+ 	stub_sec->size = ((stub_sec->size
+ 			   + (1 << htab->params->plt_stub_align) - 1)
+-			  & (-1 << htab->params->plt_stub_align));
++			  & -(1 << htab->params->plt_stub_align));
+ 
+   for (stub_sec = htab->params->stub_bfd->sections;
+        stub_sec != NULL;
+diff --git a/bfd/elflink.c b/bfd/elflink.c
+index c8068c0..ef7056a 100644
+--- a/bfd/elflink.c
++++ b/bfd/elflink.c
+@@ -7664,6 +7664,9 @@ eval_symbol (bfd_vma *result,
+ 
+     case 'S':
+       symbol_is_section = TRUE;
++#if __GNUC__ >= 7
++      __attribute__ ((fallthrough));
++#endif
+     case 's':
+       ++sym;
+       symlen = strtol (sym, (char **) symp, 10);
+diff --git a/bfd/ihex.c b/bfd/ihex.c
+index 3301f2f..30ba0b6 100644
+--- a/bfd/ihex.c
++++ b/bfd/ihex.c
+@@ -216,7 +216,7 @@ ihex_bad_byte (bfd *abfd, unsigned int lineno, int c, bfd_boolean error)
+     }
+   else
+     {
+-      char buf[10];
++      char buf[16];
+ 
+       if (! ISPRINT (c))
+ 	sprintf (buf, "\\%03o", (unsigned int) c);
+diff --git a/bfd/reloc.c b/bfd/reloc.c
+index dc47173..6eb5743 100644
+--- a/bfd/reloc.c
++++ b/bfd/reloc.c
+@@ -7392,13 +7392,22 @@ bfd_default_reloc_type_lookup (bfd *abfd, bfd_reloc_code_real_type code)
+ 	{
+ 	case 64:
+ 	  BFD_FAIL ();
++#if __GNUC__ >= 7
++	  __attribute__ ((fallthrough));
++#endif
+ 	case 32:
+ 	  return &bfd_howto_32;
+ 	case 16:
+ 	  BFD_FAIL ();
++#if __GNUC__ >= 7
++	  __attribute__ ((fallthrough));
++#endif
+ 	default:
+ 	  BFD_FAIL ();
+ 	}
++#if __GNUC__ >= 7
++      __attribute__ ((fallthrough));
++#endif
+     default:
+       BFD_FAIL ();
+     }
+diff --git a/bfd/srec.c b/bfd/srec.c
+index 42143c7..f8d2de7 100644
+--- a/bfd/srec.c
++++ b/bfd/srec.c
+@@ -246,7 +246,7 @@ srec_bad_byte (bfd *abfd,
+     }
+   else
+     {
+-      char buf[10];
++      char buf[16];
+ 
+       if (! ISPRINT (c))
+ 	sprintf (buf, "\\%03o", (unsigned int) c);
+@@ -972,10 +972,16 @@ srec_write_record (bfd *abfd,
+     case 7:
+       TOHEX (dst, (address >> 24), check_sum);
+       dst += 2;
++#if __GNUC__ >= 7
++      __attribute__ ((fallthrough));
++#endif
+     case 8:
+     case 2:
+       TOHEX (dst, (address >> 16), check_sum);
+       dst += 2;
++#if __GNUC__ >= 7
++      __attribute__ ((fallthrough));
++#endif
+     case 9:
+     case 1:
+     case 0:
+diff --git a/gdb/ada-lang.c b/gdb/ada-lang.c
+index d7c7e24..2133387 100755
+--- a/gdb/ada-lang.c
++++ b/gdb/ada-lang.c
+@@ -10859,8 +10859,8 @@ ada_evaluate_subexp (struct type *expect_type, struct expression *exp,
+         }
+       else
+         arg1 = ada_value_struct_elt (arg1, &exp->elts[pc + 2].string, 0);
+-        arg1 = unwrap_value (arg1);
+-        return ada_to_fixed_value (arg1);
++      arg1 = unwrap_value (arg1);
++      return ada_to_fixed_value (arg1);
+ 
+     case OP_TYPE:
+       /* The value is not supposed to be used.  This is here to make it
+diff --git a/gdb/c-typeprint.c b/gdb/c-typeprint.c
+index 305f92d..4b3aa74 100755
+--- a/gdb/c-typeprint.c
++++ b/gdb/c-typeprint.c
+@@ -1296,29 +1296,29 @@ c_type_print_base (struct type *type, struct ui_file *stream,
+ 	      if (TYPE_NFIELDS (type) != 0 || TYPE_NFN_FIELDS (type) != 0)
+ 		fprintf_filtered (stream, "\n");
+ 
+-		for (i = 0; i < TYPE_TYPEDEF_FIELD_COUNT (type); i++)
+-		  {
+-		    struct type *target = TYPE_TYPEDEF_FIELD_TYPE (type, i);
+-
+-		    /* Dereference the typedef declaration itself.  */
+-		    gdb_assert (TYPE_CODE (target) == TYPE_CODE_TYPEDEF);
+-		    target = TYPE_TARGET_TYPE (target);
+-
+-		    print_spaces_filtered (level + 4, stream);
+-		    fprintf_filtered (stream, "typedef ");
+-
+-		    /* We want to print typedefs with substitutions
+-		       from the template parameters or globally-known
+-		       typedefs but not local typedefs.  */
+-		    c_print_type (target,
+-				  TYPE_TYPEDEF_FIELD_NAME (type, i),
+-				  stream, show - 1, level + 4,
+-				  &semi_local_flags);
+-		    fprintf_filtered (stream, ";\n");
+-		  }
+-	      }
++	      for (i = 0; i < TYPE_TYPEDEF_FIELD_COUNT (type); i++)
++		{
++		  struct type *target = TYPE_TYPEDEF_FIELD_TYPE (type, i);
++		  
++		  /* Dereference the typedef declaration itself.  */
++		  gdb_assert (TYPE_CODE (target) == TYPE_CODE_TYPEDEF);
++		  target = TYPE_TARGET_TYPE (target);
++		  
++		  print_spaces_filtered (level + 4, stream);
++		  fprintf_filtered (stream, "typedef ");
++		  
++		  /* We want to print typedefs with substitutions
++		     from the template parameters or globally-known
++		     typedefs but not local typedefs.  */
++		  c_print_type (target,
++				TYPE_TYPEDEF_FIELD_NAME (type, i),
++				stream, show - 1, level + 4,
++				&semi_local_flags);
++		  fprintf_filtered (stream, ";\n");
++		}
++	    }
+ 
+-	    fprintfi_filtered (level, stream, "}");
++	  fprintfi_filtered (level, stream, "}");
+ 	  }
+ 
+ 	do_cleanups (local_cleanups);
+diff --git a/gdb/inflow.c b/gdb/inflow.c
+index 5f81de2..1dd9844 100755
+--- a/gdb/inflow.c
++++ b/gdb/inflow.c
+@@ -392,91 +392,91 @@ child_terminal_ours_1 (int output_only)
+   if (tinfo->run_terminal != NULL || gdb_has_a_terminal () == 0)
+     return;
+ 
+-    {
++  {
+ #ifdef SIGTTOU
+-      /* Ignore this signal since it will happen when we try to set the
+-         pgrp.  */
+-      void (*osigttou) () = NULL;
++    /* Ignore this signal since it will happen when we try to set the
++       pgrp.  */
++    void (*osigttou) () = NULL;
+ #endif
+-      int result;
++    int result;
+ 
+ #ifdef SIGTTOU
+-      if (job_control)
+-	osigttou = (void (*)()) signal (SIGTTOU, SIG_IGN);
++    if (job_control)
++      osigttou = (void (*)()) signal (SIGTTOU, SIG_IGN);
+ #endif
+ 
+-      xfree (tinfo->ttystate);
+-      tinfo->ttystate = serial_get_tty_state (stdin_serial);
++    xfree (tinfo->ttystate);
++    tinfo->ttystate = serial_get_tty_state (stdin_serial);
+ 
+ #ifdef PROCESS_GROUP_TYPE
+-      if (!inf->attach_flag)
+-	/* If setpgrp failed in terminal_inferior, this would give us
+-	   our process group instead of the inferior's.  See
+-	   terminal_inferior for details.  */
+-	tinfo->process_group = gdb_getpgrp ();
+-#endif
+-
+-      /* Here we used to set ICANON in our ttystate, but I believe this
+-         was an artifact from before when we used readline.  Readline sets
+-         the tty state when it needs to.
+-         FIXME-maybe: However, query() expects non-raw mode and doesn't
+-         use readline.  Maybe query should use readline (on the other hand,
+-         this only matters for HAVE_SGTTY, not termio or termios, I think).  */
+-
+-      /* Set tty state to our_ttystate.  We don't change in our out of raw
+-         mode, to avoid flushing input.  We need to do the same thing
+-         regardless of output_only, because we don't have separate
+-         terminal_is_ours and terminal_is_ours_for_output flags.  It's OK,
+-         though, since readline will deal with raw mode when/if it needs
+-         to.  */
+-
+-      serial_noflush_set_tty_state (stdin_serial, our_terminal_info.ttystate,
+-				    tinfo->ttystate);
+-
+-      if (job_control)
+-	{
++    if (!inf->attach_flag)
++      /* If setpgrp failed in terminal_inferior, this would give us
++	 our process group instead of the inferior's.  See
++	 terminal_inferior for details.  */
++      tinfo->process_group = gdb_getpgrp ();
++#endif
++
++    /* Here we used to set ICANON in our ttystate, but I believe this
++       was an artifact from before when we used readline.  Readline sets
++       the tty state when it needs to.
++       FIXME-maybe: However, query() expects non-raw mode and doesn't
++       use readline.  Maybe query should use readline (on the other hand,
++       this only matters for HAVE_SGTTY, not termio or termios, I think).  */
++    
++    /* Set tty state to our_ttystate.  We don't change in our out of raw
++       mode, to avoid flushing input.  We need to do the same thing
++       regardless of output_only, because we don't have separate
++       terminal_is_ours and terminal_is_ours_for_output flags.  It's OK,
++       though, since readline will deal with raw mode when/if it needs
++       to.  */
++    
++    serial_noflush_set_tty_state (stdin_serial, our_terminal_info.ttystate,
++				  tinfo->ttystate);
++    
++    if (job_control)
++      {
+ #ifdef HAVE_TERMIOS
+-	  result = tcsetpgrp (0, our_terminal_info.process_group);
++	result = tcsetpgrp (0, our_terminal_info.process_group);
+ #if 0
+-	  /* This fails on Ultrix with EINVAL if you run the testsuite
+-	     in the background with nohup, and then log out.  GDB never
+-	     used to check for an error here, so perhaps there are other
+-	     such situations as well.  */
+-	  if (result == -1)
+-	    fprintf_unfiltered (gdb_stderr,
+-				"[tcsetpgrp failed in child_terminal_ours: %s]\n",
+-				safe_strerror (errno));
++	/* This fails on Ultrix with EINVAL if you run the testsuite
++	   in the background with nohup, and then log out.  GDB never
++	   used to check for an error here, so perhaps there are other
++	   such situations as well.  */
++	if (result == -1)
++	  fprintf_unfiltered (gdb_stderr,
++			      "[tcsetpgrp failed in child_terminal_ours: %s]\n",
++			      safe_strerror (errno));
+ #endif
+ #endif /* termios */
+-
++	
+ #ifdef HAVE_SGTTY
+-	  result = ioctl (0, TIOCSPGRP, &our_terminal_info.process_group);
++	result = ioctl (0, TIOCSPGRP, &our_terminal_info.process_group);
+ #endif
+-	}
++      }
+ 
+ #ifdef SIGTTOU
+-      if (job_control)
+-	signal (SIGTTOU, osigttou);
++    if (job_control)
++      signal (SIGTTOU, osigttou);
+ #endif
+-
+-      if (!job_control)
+-	{
+-	  signal (SIGINT, sigint_ours);
++    
++    if (!job_control)
++      {
++	signal (SIGINT, sigint_ours);
+ #ifdef SIGQUIT
+-	  signal (SIGQUIT, sigquit_ours);
++	signal (SIGQUIT, sigquit_ours);
+ #endif
+-	}
+-
++      }
++    
+ #ifdef F_GETFL
+-      tinfo->tflags = fcntl (0, F_GETFL, 0);
+-
+-      /* Is there a reason this is being done twice?  It happens both
+-         places we use F_SETFL, so I'm inclined to think perhaps there
+-         is some reason, however perverse.  Perhaps not though...  */
+-      result = fcntl (0, F_SETFL, our_terminal_info.tflags);
+-      result = fcntl (0, F_SETFL, our_terminal_info.tflags);
++    tinfo->tflags = fcntl (0, F_GETFL, 0);
++    
++    /* Is there a reason this is being done twice?  It happens both
++       places we use F_SETFL, so I'm inclined to think perhaps there
++       is some reason, however perverse.  Perhaps not though...  */
++    result = fcntl (0, F_SETFL, our_terminal_info.tflags);
++    result = fcntl (0, F_SETFL, our_terminal_info.tflags);
+ #endif
+-    }
++  }
+ }
+ 
+ /* Per-inferior data key.  */
+diff --git a/gdb/remote.c b/gdb/remote.c
+index 00a835e..bcdf356 100755
+--- a/gdb/remote.c
++++ b/gdb/remote.c
+@@ -5573,7 +5573,7 @@ Packet: '%s'\n"),
+ 	  {
+ 	    p++;
+ 
+-	    if (p == '\0')
++	    if (*p == '\0')
+ 	      ;
+ 	    else if (strncmp (p,
+ 			      "process:", sizeof ("process:") - 1) == 0)
+diff --git a/gdb/symfile.c b/gdb/symfile.c
+index 5b94797..721a894 100755
+--- a/gdb/symfile.c
++++ b/gdb/symfile.c
+@@ -3278,6 +3278,7 @@ find_pc_overlay (CORE_ADDR pc)
+   struct obj_section *osect, *best_match = NULL;
+ 
+   if (overlay_debugging)
++    {
+     ALL_OBJSECTIONS (objfile, osect)
+       if (section_is_overlay (osect))
+       {
+@@ -3291,6 +3292,7 @@ find_pc_overlay (CORE_ADDR pc)
+ 	else if (pc_in_unmapped_range (pc, osect))
+ 	  best_match = osect;
+       }
++    }
+   return best_match;
+ }
+ 
+@@ -3305,9 +3307,11 @@ find_pc_mapped_section (CORE_ADDR pc)
+   struct obj_section *osect;
+ 
+   if (overlay_debugging)
++    {
+     ALL_OBJSECTIONS (objfile, osect)
+       if (pc_in_mapped_range (pc, osect) && section_is_mapped (osect))
+ 	return osect;
++    }
+ 
+   return NULL;
+ }
+@@ -3323,6 +3327,7 @@ list_overlays_command (char *args, int from_tty)
+   struct obj_section *osect;
+ 
+   if (overlay_debugging)
++    {
+     ALL_OBJSECTIONS (objfile, osect)
+       if (section_is_mapped (osect))
+       {
+@@ -3348,6 +3353,7 @@ list_overlays_command (char *args, int from_tty)
+ 
+ 	nmapped++;
+       }
++    }
+   if (nmapped == 0)
+     printf_filtered (_("No sections are mapped.\n"));
+ }
+diff --git a/include/opcode/ppc.h b/include/opcode/ppc.h
+index f8ee161..8722bc6 100644
+--- a/include/opcode/ppc.h
++++ b/include/opcode/ppc.h
+@@ -301,7 +301,7 @@ extern const unsigned int num_powerpc_operands;
+ /* Use with the shift field of a struct powerpc_operand to indicate
+      that BITM and SHIFT cannot be used to determine where the operand
+      goes in the insn.  */
+-#define PPC_OPSHIFT_INV (-1 << 31)
++#define PPC_OPSHIFT_INV (1 << 31)
+ 
+ /* Values defined for the flags field of a struct powerpc_operand.  */
+ 

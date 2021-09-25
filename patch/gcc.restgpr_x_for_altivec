@@ -1,0 +1,11 @@
+--- gcc-4.9.4/libgcc/config.host.orig	2017-12-22 09:30:26.791845838 -0600
++++ gcc-4.9.4/libgcc/config.host	2017-12-22 09:56:51.429245102 -0600
+@@ -959,7 +959,7 @@
+ 	extra_parts="$extra_parts crtbeginS.o crtendS.o crtbeginT.o ecrti.o ecrtn.o ncrti.o ncrtn.o"
+ 	;;
+ powerpc-*-eabialtivec*)
+-	tmake_file="${tmake_file} rs6000/t-ppccomm rs6000/t-crtstuff t-crtstuff-pic t-fdpbit"
++	tmake_file="${tmake_file} rs6000/t-ppccomm rs6000/t-savresfgpr rs6000/t-crtstuff t-crtstuff-pic t-fdpbit"
+ 	extra_parts="$extra_parts crtbegin.o crtend.o crtbeginS.o crtendS.o crtbeginT.o ecrti.o ecrtn.o ncrti.o ncrtn.o"
+ 	;;
+ powerpc-xilinx-eabi*)

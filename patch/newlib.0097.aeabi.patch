@@ -1,0 +1,25 @@
+diff -Naur newlib-2.2.0-orig/config.sub newlib-2.2.0/config.sub
+--- newlib-2.2.0-orig/config.sub	2015-02-12 10:57:49.036952006 -0600
++++ newlib-2.2.0/config.sub	2015-02-12 10:58:19.901952006 -0600
+@@ -1381,7 +1381,7 @@
+ 	      | -ekkobsd* | -kfreebsd* | -freebsd* | -riscix* | -lynxos* \
+ 	      | -bosx* | -nextstep* | -cxux* | -aout* | -elf* | -oabi* \
+ 	      | -ptx* | -coff* | -ecoff* | -winnt* | -domain* | -vsta* \
+-	      | -udi* | -eabi* | -lites* | -ieee* | -go32* | -aux* \
++	      | -udi* | -eabi* | -aeabi* | -lites* | -ieee* | -go32* | -aux* \
+ 	      | -chorusos* | -chorusrdb* | -cegcc* \
+ 	      | -cygwin* | -msys* | -pe* | -psos* | -moss* | -proelf* | -rtems* \
+ 	      | -mingw32* | -mingw64* | -linux-gnu* | -linux-android* \
+diff -Naur newlib-2.2.0-orig/configure newlib-2.2.0/configure
+--- newlib-2.2.0-orig/configure	2015-02-12 10:57:49.037952006 -0600
++++ newlib-2.2.0/configure	2015-02-12 10:58:19.905952006 -0600
+@@ -3568,6 +3568,9 @@
+     noconfigdirs="$noconfigdirs ld gas gdb gprof"
+     noconfigdirs="$noconfigdirs sim target-rda"
+     ;;
++  powerpc-*-aeabi*)
++    noconfigdirs="$noconfigdirs target-libgloss"
++    ;;
+   i[3456789]86-*-darwin*)
+     noconfigdirs="$noconfigdirs ld gprof"
+     noconfigdirs="$noconfigdirs sim target-rda"

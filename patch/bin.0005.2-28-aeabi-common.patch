@@ -1,0 +1,26 @@
+diff --git a/bfd/config.bfd b/bfd/config.bfd
+index 1b28016..691953e 100644
+--- a/bfd/config.bfd
++++ b/bfd/config.bfd
+@@ -1383,7 +1383,7 @@ case "${targ}" in
+     targ_selvecs="rs6000_xcoff_vec powerpc_elf32_vec powerpc_elf32_le_vec powerpc_boot_vec"
+     targ64_selvecs="powerpc_elf64_vec powerpc_elf64_le_vec powerpc_elf64_fbsd_vec"
+     ;;
+-  powerpc-*-*bsd* | powerpc-*-elf* | powerpc-*-sysv4* | powerpc-*-eabi* | \
++  powerpc-*-*bsd* | powerpc-*-elf* | powerpc-*-sysv4* | powerpc-*-eabi* | powerpc-*-aeabi* | \
+   powerpc-*-solaris2* | powerpc-*-linux-* | powerpc-*-rtems* | \
+   powerpc-*-chorus*)
+     targ_defvec=powerpc_elf32_vec
+diff --git a/config.sub b/config.sub
+index 70a4180..d06e044 100755
+--- a/config.sub
++++ b/config.sub
+@@ -1394,7 +1394,7 @@ case $os in
+ 	      | -ekkobsd* | -kfreebsd* | -freebsd* | -riscix* | -lynxos* \
+ 	      | -bosx* | -nextstep* | -cxux* | -aout* | -elf* | -oabi* \
+ 	      | -ptx* | -coff* | -ecoff* | -winnt* | -domain* | -vsta* \
+-	      | -udi* | -eabi* | -lites* | -ieee* | -go32* | -aux* \
++	      | -udi* | -eabi* | -aeabi* | -lites* | -ieee* | -go32* | -aux* \
+ 	      | -chorusos* | -chorusrdb* | -cegcc* \
+ 	      | -cygwin* | -msys* | -pe* | -psos* | -moss* | -proelf* | -rtems* \
+ 	      | -midipix* | -mingw32* | -mingw64* | -linux-gnu* | -linux-android* \

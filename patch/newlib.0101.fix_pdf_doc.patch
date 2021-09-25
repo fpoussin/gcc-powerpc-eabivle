@@ -1,0 +1,20 @@
+#Problem Statement
+  Since about TexInfo 5.0, using '@*' immediately after a table causes a 'You
+  can't use `@unskip' in vertical mode' error.
+
+  See https://sourceware.org/ml/newlib/2013/msg00057.html
+
+  Signed-off-by: Jon TURNEY <jon.turney@dronecode.org.uk>
+
+diff -Naur newlib-2.2.0/newlib/doc/doc.str newlib-2.2.0-pdf-fix/newlib/doc/doc.str
+--- newlib-2.2.0/newlib/doc/doc.str     2016-01-11 23:32:11.115388511 -0600
++++ newlib-2.2.0-pdf-fix/newlib/doc/doc.str     2016-01-11 23:30:30.976390270 -0600
+@@ -107,7 +107,7 @@
+ 	courierize
+	do_fancy_stuff
+	catstr
+-	"@*\n" catstr
++	"@sp 1\n" catstr
+	;
+
+ : asection

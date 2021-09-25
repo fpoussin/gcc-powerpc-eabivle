@@ -1,0 +1,4794 @@
+diff --git a/gas/config/tc-ppc.c b/gas/config/tc-ppc.c
+index d104d14..2f59d47 100644
+--- a/gas/config/tc-ppc.c
++++ b/gas/config/tc-ppc.c
+@@ -48,6 +48,9 @@ extern int target_big_endian;
+ /* Whether or not, we've set target_big_endian.  */
+ static int set_target_endian = 0;
+ 
++/* SPE version. Allowed values: 1 or 2 */
++int spe_version = 1;
++
+ /* Whether to use user friendly register names.  */
+ #ifndef TARGET_REG_NAMES_P
+ #ifdef TE_PE
+@@ -1153,6 +1156,16 @@ md_parse_option (int c, const char *arg)
+ 	    }
+ 	}
+ 
++      else if (strcmp (arg, "no-vle") == 0)
++        {
++        sticky &= ~PPC_OPCODE_VLE;
++
++        new_cpu = ppc_parse_cpu (ppc_cpu, &sticky, "booke");
++        new_cpu &= ~PPC_OPCODE_VLE;
++
++        ppc_cpu = new_cpu;
++        }
++
+       else if (strcmp (arg, "regnames") == 0)
+ 	reg_names_p = TRUE;
+ 
+@@ -1205,6 +1218,15 @@ md_parse_option (int c, const char *arg)
+ 	  msolaris = FALSE;
+ 	  ppc_comment_chars = ppc_eabi_comment_chars;
+ 	}
++      else if (strcmp (arg, "spe") == 0)
++        {
++          spe_version = 1;
++        }
++      else if (strcmp (arg, "spe2") == 0)
++	{
++	  spe_version = 2;
++	  ppc_cpu |= PPC_OPCODE_SPE2;
++	}
+ #endif
+       else
+ 	{
+@@ -1301,6 +1323,7 @@ PowerPC options:\n\
+ -me5500,                generate code for Freescale e5500 core complex\n\
+ -me6500,                generate code for Freescale e6500 core complex\n\
+ -mspe                   generate code for Motorola SPE instructions\n\
++-mspe2                  generate code for Freescale SPE2 instructions\n\
+ -mvle                   generate code for Freescale VLE instructions\n\
+ -mtitan                 generate code for AppliedMicro Titan core complex\n\
+ -mregnames              Allow symbolic names for registers\n\
+@@ -1636,6 +1659,54 @@ ppc_setup_opcodes (void)
+ 	}
+     }
+ 
++  /* SPE2 instructions */
++  if ((ppc_cpu & PPC_OPCODE_SPE2) == PPC_OPCODE_SPE2)
++    {
++      op_end = spe2_opcodes + spe2_num_opcodes;
++      for (op = spe2_opcodes; op < op_end; op++)
++        {
++        if (ENABLE_CHECKING)
++          {
++          if (op != spe2_opcodes)
++            {
++            unsigned old_seg, new_seg;
++
++            old_seg = VLE_OP (op[-1].opcode, op[-1].mask);
++            old_seg = VLE_OP_TO_SEG (old_seg);
++            new_seg = VLE_OP (op[0].opcode, op[0].mask);
++            new_seg = VLE_OP_TO_SEG (new_seg);
++
++            /* The major opcodes had better be sorted.  Code in the
++               disassembler assumes the insns are sorted according to
++               major opcode.  */
++            if (new_seg < old_seg)
++              {
++              as_bad (_("major opcode is not sorted for %s"), op->name);
++              bad_insn = TRUE;
++              }
++            }
++
++          bad_insn |= insn_validate (op);
++          }
++
++	if ((ppc_cpu & op->flags) != 0 && !(ppc_cpu & op->deprecated))
++          {
++          const char *retval;
++
++          retval = hash_insert (ppc_hash, op->name, (void *) op);
++          if (retval != NULL)
++            {
++            as_bad (_("duplicate instruction %s"),
++                    op->name);
++            bad_insn = TRUE;
++            }
++          }
++        }
++
++    for (op = spe2_opcodes; op < op_end; op++)
++      hash_insert (ppc_hash, op->name, (void *) op);   
++    }
++
+   /* Insert the macros into a hash table.  */
+   ppc_macro_hash = hash_new ();
+ 
+diff --git a/gas/config/tc-ppc.h b/gas/config/tc-ppc.h
+index 55b77d4..60bd9ba 100644
+--- a/gas/config/tc-ppc.h
++++ b/gas/config/tc-ppc.h
+@@ -49,6 +49,9 @@ extern unsigned long ppc_mach (void);
+ /* Whether or not the target is big endian */
+ extern int target_big_endian;
+ 
++/* Convert or not BookE assembler to VLE */
++extern int translate_ppc_asm_to_vle;
++
+ /* The target BFD format.  */
+ #define TARGET_FORMAT (ppc_target_format ())
+ extern const char *ppc_target_format (void);
+diff --git a/gas/doc/as.texinfo b/gas/doc/as.texinfo
+index 518b38b..6545251 100644
+--- a/gas/doc/as.texinfo
++++ b/gas/doc/as.texinfo
+@@ -6495,6 +6495,8 @@ combination of the following characters:
+ section is allocatable
+ @item e
+ section is excluded from executable and shared library.
++@item v
++section contains PowerPC VLE code (sets the SHF_PPC_VLE flag bit)
+ @item w
+ section is writable
+ @item x
+diff --git a/gas/doc/c-ppc.texi b/gas/doc/c-ppc.texi
+index d94b418..7e66625 100644
+--- a/gas/doc/c-ppc.texi
++++ b/gas/doc/c-ppc.texi
+@@ -99,6 +99,9 @@ Generate code for Freescale e6500 core complex.
+ @item -mspe
+ Generate code for Motorola SPE instructions.
+ 
++@item -mspe2
++Generate code for Freescale SPE2 instructions.
++
+ @item -mtitan
+ Generate code for AppliedMicro Titan core complex.
+ 
+diff --git a/gas/testsuite/gas/ppc/cmpe200gcc-0010.d b/gas/testsuite/gas/ppc/cmpe200gcc-0010.d
+new file mode 100644
+index 0000000..c172879
+--- /dev/null
++++ b/gas/testsuite/gas/ppc/cmpe200gcc-0010.d
+@@ -0,0 +1,15 @@
++#as: -mvle
++#objdump: -d
++#name: Validate move to MAS instructions
++
++.*: +file format elf.*-powerpc.*
++
++Disassembly of section .text:
++
++00000000 <.text>:
++   0:	7c 30 9b a6 	mtmas0  r1
++   4:	7c 31 9b a6 	mtmas1  r1
++   8:	7c 32 9b a6 	mtmas2  r1
++   c:	7c 33 9b a6 	mtmas3  r1
++  10:	7c 34 9b a6 	mtmas4  r1
++  14:	7c 36 9b a6 	mtmas6  r1
+\ No newline at end of file
+diff --git a/gas/testsuite/gas/ppc/cmpe200gcc-0010.s b/gas/testsuite/gas/ppc/cmpe200gcc-0010.s
+new file mode 100644
+index 0000000..faec671
+--- /dev/null
++++ b/gas/testsuite/gas/ppc/cmpe200gcc-0010.s
+@@ -0,0 +1,13 @@
++# PA move to MAS registers
++# CMPE200GCC-10
++	.section ".text"
++
++	mtmas0    1
++	mtmas1    1
++	mtmas2    1
++	mtmas3    1
++	mtmas4    1
++	mtmas6    1
++
++
++
+diff --git a/gas/testsuite/gas/ppc/cmpe200gcc-0034.d b/gas/testsuite/gas/ppc/cmpe200gcc-0034.d
+new file mode 100644
+index 0000000..10fc8e3
+--- /dev/null
++++ b/gas/testsuite/gas/ppc/cmpe200gcc-0034.d
+@@ -0,0 +1,94 @@
++#as: -mvle
++#objdump: -d
++#name: Validate move to/from SPRs
++
++.*: +file format elf.*-powerpc.*
++
++Disassembly of section .text:
++
++00000000 <.text>:
++   0:	7c 36 02 a6 	mfdec   r1
++   4:	7c 36 0a a6 	mfdecar r1
++   8:	7c 23 82 a6 	mfl1cfg0 r1
++   c:	7c 24 82 a6 	mfl1cfg1 r1
++  10:	7c 33 82 a6 	mfivor35 r1
++  14:	7c 30 8a a6 	mfctxcr r1
++  18:	7c 31 8a a6 	mfdbcr3 r1
++  1c:	7c 32 8a a6 	mfdbcnt r1
++  20:	7c 33 8a a6 	mfdbcr4 r1
++  24:	7c 34 8a a6 	mfdbcr5 r1
++  28:	7c 35 8a a6 	mfiac5  r1
++  2c:	7c 36 8a a6 	mfiac6  r1
++  30:	7c 37 8a a6 	mfiac7  r1
++  34:	7c 38 8a a6 	mfiac8  r1
++  38:	7c 39 8a a6 	mfdberc0 r1
++  3c:	7c 3a 8a a6 	mfmcsrr0 r1
++  40:	7c 3b 8a a6 	mfmcsrr1 r1
++  44:	7c 20 92 a6 	mfddam  r1
++  48:	7c 3b 92 a6 	mfdbcr6 r1
++  4c:	7c 3c 92 a6 	mfsprg8 r1
++  50:	7c 3d 92 a6 	mfsprg9 r1
++  54:	7c 39 9a a6 	mfpid1  r1
++  58:	7c 3a 9a a6 	mfpid2  r1
++  5c:	7c 30 aa a6 	mftlb0cfg r1
++  60:	7c 31 aa a6 	mftlb1cfg r1
++  64:	7c 3f ea a6 	mfl1finv1 r1
++  68:	7c 30 fa a6 	mfhid0  r1
++  6c:	7c 31 fa a6 	mfhid1  r1
++  70:	7c 32 fa a6 	mfl1csr0 r1
++  74:	7c 33 fa a6 	mfl1csr1 r1
++  78:	7c 34 fa a6 	mfmmucsr0 r1
++  7c:	7c 35 fa a6 	mfbucsr r1
++  80:	7c 37 fa a6 	mfmmucfg r1
++  84:	7c 38 fa a6 	mfl1finv0 r1
++  88:	7c 3f fa a6 	mfsvr   r1
++  8c:	7c 36 03 a6 	mtdec   r1
++  90:	7c 3c 43 a6 	mttbl   r1
++  94:	7c 3d 43 a6 	mttbu   r1
++  98:	7c 3e 43 a6 	mtpir   r1
++  9c:	7c 33 83 a6 	mtivor35 r1
++  a0:	7c 30 8b a6 	mtctxcr r1
++  a4:	7c 31 8b a6 	mtdbcr3 r1
++  a8:	7c 32 8b a6 	mtdbcnt r1
++  ac:	7c 33 8b a6 	mtdbcr4 r1
++  b0:	7c 34 8b a6 	mtdbcr5 r1
++  b4:	7c 35 8b a6 	mtiac5  r1
++  b8:	7c 36 8b a6 	mtiac6  r1
++  bc:	7c 37 8b a6 	mtiac7  r1
++  c0:	7c 38 8b a6 	mtiac8  r1
++  c4:	7c 3d 8b a6 	mtmcar  r1
++  c8:	7c 3e 8b a6 	mtdsrr0 r1
++  cc:	7c 3f 8b a6 	mtdsrr1 r1
++  d0:	7c 20 93 a6 	mtddam  r1
++  d4:	7c 3b 93 a6 	mtdbcr6 r1
++  d8:	7c 3c 93 a6 	mtsprg8 r1
++  dc:	7c 3d 93 a6 	mtsprg9 r1
++  e0:	7c 30 9b a6 	mtmas0  r1
++  e4:	7c 31 9b a6 	mtmas1  r1
++  e8:	7c 32 9b a6 	mtmas2  r1
++  ec:	7c 33 9b a6 	mtmas3  r1
++  f0:	7c 34 9b a6 	mtmas4  r1
++  f4:	7c 36 9b a6 	mtmas6  r1
++  f8:	7c 39 9b a6 	mtpid1  r1
++  fc:	7c 3a 9b a6 	mtpid2  r1
++ 100:	7c 3f eb a6 	mtl1finv1 r1
++ 104:	7c 30 fb a6 	mthid0  r1
++ 108:	7c 31 fb a6 	mthid1  r1
++ 10c:	7c 32 fb a6 	mtl1csr0 r1
++ 110:	7c 33 fb a6 	mtl1csr1 r1
++ 114:	7c 34 fb a6 	mtmmucsr0 r1
++ 118:	7c 35 fb a6 	mtbucsr r1
++ 11c:	7c 38 fb a6 	mtl1finv0 r1
++ 120:	44 00       	se_nop
++ 122:	7c 30 0b a6 	mtpid   r1
++ 126:	7c 30 0a a6 	mfpid   r1
++ 12a:	7c 3c 43 a6 	mttbl   r1
++ 12e:	7c 3d 43 a6 	mttbu   r1
++ 132:	7c 24 42 a6 	mfsprg  r1,4
++ 136:	7c 25 42 a6 	mfsprg  r1,5
++ 13a:	7c 26 42 a6 	mfsprg  r1,6
++ 13e:	7c 27 42 a6 	mfsprg  r1,7
++ 142:	7c 30 aa a6 	mftlb0cfg r1
++ 146:	7c 31 aa a6 	mftlb1cfg r1
++ 14a:	7c 38 8a a6 	mfiac8  r1
++ 14e:	7c 38 8b a6 	mtiac8  r1
+\ No newline at end of file
+diff --git a/gas/testsuite/gas/ppc/cmpe200gcc-0034.s b/gas/testsuite/gas/ppc/cmpe200gcc-0034.s
+new file mode 100644
+index 0000000..a7b7c60
+--- /dev/null
++++ b/gas/testsuite/gas/ppc/cmpe200gcc-0034.s
+@@ -0,0 +1,96 @@
++# PA move to/from SPRs
++# CMPE200GCC-34
++	.section ".text"
++
++/* Move from SPR */
++	mfdec       1
++	mfdecar     1
++	mfl1cfg0    1
++	mfl1cfg1    1
++	mfivor35    1
++	mfctxcr     1
++	mfdbcr3     1
++	mfdbcnt     1
++	mfdbcr4     1
++	mfdbcr5     1
++	mfiac5      1
++	mfiac6      1
++	mfiac7      1
++	mfiac8      1
++	mfdberc0    1
++	mfmcsrr0    1
++	mfmcsrr1    1
++	mfddam      1
++	mfdbcr6     1
++	mfsprg8     1
++	mfsprg9     1
++	mfpid1      1
++	mfpid2      1
++	mftlb0cfg   1
++	mftlb1cfg   1
++	mfl1finv1   1
++	mfhid0      1
++	mfhid1      1
++	mfl1csr0    1
++	mfl1csr1    1
++	mfmmucsr0   1
++	mfbucsr     1
++	mfmmucfg    1
++	mfl1finv0   1
++	mfsvr       1
++
++/* Move to SPR */
++	mtdec       1
++	mttbl       1
++	mttbu       1
++	mtpir       1
++	mtivor35    1
++	mtctxcr     1
++	mtdbcr3     1
++	mtdbcnt     1
++	mtdbcr4     1
++	mtdbcr5     1
++	mtiac5      1
++	mtiac6      1
++	mtiac7      1
++	mtiac8      1
++	mtmcar      1
++	mtdsrr0     1
++	mtdsrr1     1
++	mtddam      1
++	mtdbcr6     1
++	mtsprg8     1
++	mtsprg9     1
++	mtmas0      1
++	mtmas1      1
++	mtmas2      1
++	mtmas3      1
++	mtmas4      1
++	mtmas6      1
++	mtpid1      1
++	mtpid2      1
++	mtl1finv1   1
++	mthid0      1
++	mthid1      1
++	mtl1csr0    1
++	mtl1csr1    1
++	mtmmucsr0   1
++	mtbucsr     1
++	mtl1finv0   1
++	
++/* mapped mnemonics */
++	nop
++	mtpid0      1
++	mfpid0      1
++	tbl_write   1
++	tbu_write   1
++	sprg4.r     1
++	sprg5.r     1
++	sprg6.r     1
++	sprg7.r     1
++	mftlbcfg0   1
++	mftlbcfg1   1
++	mfaltctxcr  1
++	mtaltctxcr  1
++
++
+diff --git a/gas/testsuite/gas/ppc/cmpe200gcc-0035.d b/gas/testsuite/gas/ppc/cmpe200gcc-0035.d
+new file mode 100644
+index 0000000..3e31bdb
+--- /dev/null
++++ b/gas/testsuite/gas/ppc/cmpe200gcc-0035.d
+@@ -0,0 +1,12 @@
++#as: -mvle
++#objdump: -d
++#name: Validate MPU instructions
++
++.*: +file format elf.*-powerpc.*
++
++Disassembly of section .text:
++
++00000000 <.text>:
++   0:	7e 00 07 64 	mpure
++   4:	7e 00 07 a4 	mpuwe
++   8:	7e 00 04 6c 	mpusync
+diff --git a/gas/testsuite/gas/ppc/cmpe200gcc-0035.s b/gas/testsuite/gas/ppc/cmpe200gcc-0035.s
+new file mode 100644
+index 0000000..85e5977
+--- /dev/null
++++ b/gas/testsuite/gas/ppc/cmpe200gcc-0035.s
+@@ -0,0 +1,7 @@
++# PA MPU instructions in accordance with e200z430 RM
++# CMPE200GCC-35
++	.section ".text"
++
++	mpure
++	mpuwe
++	mpusync
+diff --git a/gas/testsuite/gas/ppc/e200z4_decorated.d b/gas/testsuite/gas/ppc/e200z4_decorated.d
+new file mode 100644
+index 0000000..df22450
+--- /dev/null
++++ b/gas/testsuite/gas/ppc/e200z4_decorated.d
+@@ -0,0 +1,11 @@
++#as: -me200z4
++#objdump: -d -Me200z4
++#name: Decorated instructions for e200z4
++
++.*: +file format elf.*-powerpc.*
++
++Disassembly of section .text:
++
++0+00 <access>:
++   0:	7c 63 24 86 	lwdx    r3,r3,r4
++   4:	00 04       	se_blr
+diff --git a/gas/testsuite/gas/ppc/e200z4_decorated.s b/gas/testsuite/gas/ppc/e200z4_decorated.s
+new file mode 100644
+index 0000000..f51466d
+--- /dev/null
++++ b/gas/testsuite/gas/ppc/e200z4_decorated.s
+@@ -0,0 +1,6 @@
++# Decorated instructions for e200z4
++# as: -me200z4
++        .text
++access:
++        lwdx 3,3,4
++        se_blr
+diff --git a/gas/testsuite/gas/ppc/e200z4_decorated_booke.d b/gas/testsuite/gas/ppc/e200z4_decorated_booke.d
+new file mode 100644
+index 0000000..504d1df
+--- /dev/null
++++ b/gas/testsuite/gas/ppc/e200z4_decorated_booke.d
+@@ -0,0 +1,11 @@
++#as: -me500mc
++#objdump: -d
++#name: Decorated instructions for e200z4
++
++.*: +file format elf.*-powerpc.*
++
++Disassembly of section .text:
++
++0+00 <access>:
++   0:	7c 63 24 86 	lwdx    r3,r3,r4
++   4:	4e 80 00 20 	blr
+diff --git a/gas/testsuite/gas/ppc/e200z4_decorated_booke.s b/gas/testsuite/gas/ppc/e200z4_decorated_booke.s
+new file mode 100644
+index 0000000..442af0d
+--- /dev/null
++++ b/gas/testsuite/gas/ppc/e200z4_decorated_booke.s
+@@ -0,0 +1,6 @@
++# Decorated instructions for e200z4
++# as: -me200z4 -me500mc
++	.text
++access:
++        lwdx 3,3,4
++        blr
+diff --git a/gas/testsuite/gas/ppc/efs.d b/gas/testsuite/gas/ppc/efs.d
+new file mode 100644
+index 0000000..896e1b3
+--- /dev/null
++++ b/gas/testsuite/gas/ppc/efs.d
+@@ -0,0 +1,25 @@
++#as: -mvle
++#objdump: -d -Mefs -Mvle
++#name: Validate EFS instructions
++
++.*: +file format elf.*-powerpc.*
++
++Disassembly of section .text:
++
++00000000 <.text>:
++   0:	10 00 12 d1 	efscfsi r0,r2
++   4:	10 00 12 d5 	efsctsi r0,r2
++   8:	10 00 12 f1 	efdcfsi r0,r2
++   c:	10 00 12 f5 	efdctsi r0,r2
++  10:	10 01 12 c2 	efsmadd r0,r1,r2
++  14:	10 01 12 c3 	efsmsub r0,r1,r2
++  18:	10 01 12 ca 	efsnmadd r0,r1,r2
++  1c:	10 01 12 cb 	efsnmsub r0,r1,r2
++  20:	10 01 12 e2 	efdmadd r0,r1,r2
++  24:	10 01 12 e3 	efdmsub r0,r1,r2
++  28:	10 01 12 ea 	efdnmadd r0,r1,r2
++  2c:	10 01 12 eb 	efdnmsub r0,r1,r2
++  30:	10 01 12 f0 	efdcfuid r0,r2
++  34:	10 01 12 f1 	efdcfsid r0,r2
++  38:	10 01 12 f8 	efdctuidz r0,r2
++  3c:	10 01 12 fa 	efdctsidz r0,r2
+\ No newline at end of file
+diff --git a/gas/testsuite/gas/ppc/efs.s b/gas/testsuite/gas/ppc/efs.s
+new file mode 100644
+index 0000000..b284a41
+--- /dev/null
++++ b/gas/testsuite/gas/ppc/efs.s
+@@ -0,0 +1,33 @@
++# PA EFS 1.0 and 1.1 instructions
++# CMPE200GCC-62
++	.section ".text"
++
++	.equ	rA,1
++	.equ	rB,2
++	.equ	rD,0
++
++;# EFS 1.0 instructions in accordance with EFP2_rev.1.4_spec
++	efscfsi   rD, rB
++	efsctsi   rD, rB
++	efdcfsi   rD, rB
++	efdctsi   rD, rB
++
++;# EFS 1.1 instructions in accordance with EFP2_rev.1.4_spec
++	efsmadd   rD, rA, rB
++	efsmsub   rD, rA, rB
++	efsnmadd  rD, rA, rB
++	efsnmsub  rD, rA, rB
++	efdmadd   rD, rA, rB
++	efdmsub   rD, rA, rB
++	efdnmadd  rD, rA, rB
++	efdnmsub  rD, rA, rB
++
++;# moved EFS opcodes in accordance with EFP2_rev.1.4_spec
++	efdcfuid  rD, rB
++	efdcfsid  rD, rB
++	efdctuidz rD, rB
++	efdctsidz rD, rB
++
++
++
++
+diff --git a/gas/testsuite/gas/ppc/efs2.d b/gas/testsuite/gas/ppc/efs2.d
+new file mode 100644
+index 0000000..36b5895
+--- /dev/null
++++ b/gas/testsuite/gas/ppc/efs2.d
+@@ -0,0 +1,19 @@
++#as: -mvle
++#objdump: -d -Mvle
++#name: Validate EFS2 instructions
++
++.*: +file format elf.*-powerpc.*
++
++Disassembly of section .text:
++
++00000000 <.text>:
++   0:	10 01 12 b0 	efsmax  r0,r1,r2
++   4:	10 01 12 b1 	efsmin  r0,r1,r2
++   8:	10 01 12 b8 	efdmax  r0,r1,r2
++   c:	10 01 12 b9 	efdmin  r0,r1,r2
++  10:	10 01 02 c7 	efssqrt r0,r1
++  14:	10 04 12 d1 	efscfh  r0,r2
++  18:	10 04 12 d5 	efscth  r0,r2
++  1c:	10 01 02 e7 	efdsqrt r0,r1
++  20:	10 04 12 f1 	efdcfh  r0,r2
++  24:	10 04 12 f5 	efdcth  r0,r2
+\ No newline at end of file
+diff --git a/gas/testsuite/gas/ppc/efs2.s b/gas/testsuite/gas/ppc/efs2.s
+new file mode 100644
+index 0000000..5d35e98
+--- /dev/null
++++ b/gas/testsuite/gas/ppc/efs2.s
+@@ -0,0 +1,18 @@
++# PA EFS2 instructions in accordance with EFP2_rev.1.4_spec
++# CMPE200GCC-62
++	.section ".text"
++
++	.equ	rA,1
++	.equ	rB,2
++	.equ	rD,0
++
++	efsmax     rD, rA, rB
++	efsmin     rD, rA, rB
++	efdmax     rD, rA, rB
++	efdmin     rD, rA, rB
++	efssqrt    rD, rA
++	efscfh     rD, rB
++	efscth     rD, rB
++	efdsqrt    rD, rA
++	efdcfh     rD, rB
++	efdcth     rD, rB
+diff --git a/gas/testsuite/gas/ppc/lsp-checks.d b/gas/testsuite/gas/ppc/lsp-checks.d
+new file mode 100644
+index 0000000..a91e09d
+--- /dev/null
++++ b/gas/testsuite/gas/ppc/lsp-checks.d
+@@ -0,0 +1,3 @@
++#name: Test LSP operands checks
++#as: -mvle
++#error-output: lsp-checks.l
+diff --git a/gas/testsuite/gas/ppc/lsp-checks.l b/gas/testsuite/gas/ppc/lsp-checks.l
+new file mode 100644
+index 0000000..db2eff7
+--- /dev/null
++++ b/gas/testsuite/gas/ppc/lsp-checks.l
+@@ -0,0 +1,92 @@
++[^:]*: Assembler messages:
++[^:]*:22: Error: invalid offset
++[^:]*:23: Error: UIMM values >15 are illegal
++[^:]*:24: Error: UIMM values >15 are illegal
++[^:]*:25: Error: UIMM values >15 are illegal
++[^:]*:26: Error: UIMM values >15 are illegal
++[^:]*:27: Error: UIMM values >15 are illegal
++[^:]*:28: Error: UIMM values >15 are illegal
++[^:]*:29: Error: GPR odd is illegal
++[^:]*:30: Error: operand out of domain \(7 is not a multiple of 8\)
++[^:]*:31: Error: GPR odd is illegal
++[^:]*:32: Error: operand out of domain \(7 is not a multiple of 8\)
++[^:]*:33: Error: GPR odd is illegal
++[^:]*:34: Error: operand out of domain \(7 is not a multiple of 8\)
++[^:]*:35: Error: GPR odd is illegal
++[^:]*:36: Error: operand out of domain \(3 is not a multiple of 4\)
++[^:]*:37: Error: GPR odd is illegal
++[^:]*:38: Error: operand out of domain \(3 is not a multiple of 4\)
++[^:]*:39: Error: GPR odd is illegal
++[^:]*:40: Error: operand out of domain \(3 is not a multiple of 4\)
++[^:]*:41: Error: GPR odd is illegal
++[^:]*:42: Error: operand out of domain \(3 is not a multiple of 4\)
++[^:]*:43: Error: GPR odd is illegal
++[^:]*:44: Error: operand out of domain \(3 is not a multiple of 4\)
++[^:]*:45: Error: GPR odd is illegal
++[^:]*:46: Error: operand out of domain \(3 is not a multiple of 4\)
++[^:]*:47: Error: GPR odd is illegal
++[^:]*:48: Error: operand out of domain \(3 is not a multiple of 4\)
++[^:]*:49: Error: GPR odd is illegal
++[^:]*:50: Error: operand out of domain \(3 is not a multiple of 4\)
++[^:]*:51: Error: operand out of domain \(3 is not a multiple of 4\)
++[^:]*:52: Error: operand out of domain \(3 is not a multiple of 2\)
++[^:]*:53: Error: operand out of domain \(3 is not a multiple of 2\)
++[^:]*:54: Error: GPR odd is illegal
++[^:]*:55: Error: operand out of domain \(7 is not a multiple of 8\)
++[^:]*:56: Error: GPR odd is illegal
++[^:]*:57: Error: operand out of domain \(7 is not a multiple of 8\)
++[^:]*:58: Error: GPR odd is illegal
++[^:]*:59: Error: operand out of domain \(7 is not a multiple of 8\)
++[^:]*:60: Error: GPR odd is illegal
++[^:]*:61: Error: operand out of domain \(3 is not a multiple of 4\)
++[^:]*:62: Error: GPR odd is illegal
++[^:]*:63: Error: operand out of domain \(3 is not a multiple of 4\)
++[^:]*:64: Error: operand out of domain \(3 is not a multiple of 2\)
++[^:]*:65: Error: operand out of domain \(3 is not a multiple of 2\)
++[^:]*:66: Error: operand out of domain \(3 is not a multiple of 2\)
++[^:]*:67: Error: operand out of domain \(3 is not a multiple of 2\)
++[^:]*:68: Error: operand out of domain \(3 is not a multiple of 2\)
++[^:]*:69: Error: operand out of domain \(3 is not a multiple of 4\)
++[^:]*:70: Error: operand out of domain \(3 is not a multiple of 4\)
++[^:]*:71: Error: GPR odd is illegal
++[^:]*:72: Error: UIMM = 00000 is illegal
++[^:]*:73: Error: GPR odd is illegal
++[^:]*:74: Error: UIMM = 00000 is illegal
++[^:]*:75: Error: GPR odd is illegal
++[^:]*:76: Error: UIMM = 00000 is illegal
++[^:]*:77: Error: GPR odd is illegal
++[^:]*:78: Error: UIMM = 00000 is illegal
++[^:]*:79: Error: GPR odd is illegal
++[^:]*:80: Error: UIMM = 00000 is illegal
++[^:]*:81: Error: GPR odd is illegal
++[^:]*:82: Error: UIMM = 00000 is illegal
++[^:]*:83: Error: GPR odd is illegal
++[^:]*:84: Error: UIMM = 00000 is illegal
++[^:]*:85: Error: GPR odd is illegal
++[^:]*:86: Error: UIMM = 00000 is illegal
++[^:]*:87: Error: GPR odd is illegal
++[^:]*:88: Error: UIMM = 00000 is illegal
++[^:]*:89: Error: GPR odd is illegal
++[^:]*:90: Error: UIMM = 00000 is illegal
++[^:]*:91: Error: GPR odd is illegal
++[^:]*:92: Error: UIMM = 00000 is illegal
++[^:]*:93: Error: UIMM = 00000 is illegal
++[^:]*:94: Error: UIMM = 00000 is illegal
++[^:]*:95: Error: UIMM = 00000 is illegal
++[^:]*:96: Error: UIMM = 00000 is illegal
++[^:]*:97: Error: UIMM = 00000 is illegal
++[^:]*:98: Error: GPR odd is illegal
++[^:]*:99: Error: UIMM = 00000 is illegal
++[^:]*:100: Error: GPR odd is illegal
++[^:]*:101: Error: UIMM = 00000 is illegal
++[^:]*:102: Error: GPR odd is illegal
++[^:]*:103: Error: UIMM = 00000 is illegal
++[^:]*:104: Error: GPR odd is illegal
++[^:]*:105: Error: UIMM = 00000 is illegal
++[^:]*:106: Error: UIMM = 00000 is illegal
++[^:]*:107: Error: UIMM = 00000 is illegal
++[^:]*:108: Error: UIMM = 00000 is illegal
++[^:]*:109: Error: UIMM = 00000 is illegal
++[^:]*:110: Error: UIMM = 00000 is illegal
++[^:]*:111: Error: UIMM = 00000 is illegal
++[^:]*:112: Error: UIMM = 00000 is illegal
+diff --git a/gas/testsuite/gas/ppc/lsp-checks.s b/gas/testsuite/gas/ppc/lsp-checks.s
+new file mode 100644
+index 0000000..65c7909
+--- /dev/null
++++ b/gas/testsuite/gas/ppc/lsp-checks.s
+@@ -0,0 +1,112 @@
++# Test PA LSP operands checks
++	.section ".text"
++
++	.equ	rA,1
++	.equ	rB,2
++	.equ	rD,0           ;# ok
++	.equ	rD_odd, 1      ;# GPR odd is illegal
++	.equ	rS,0           ;# ok
++	.equ	rS_odd, 1      ;# GPR odd is illegal
++	.equ	UIMM_GT15, 16  ;# UIMM values >15 are illegal
++	.equ	UIMM_2, 2      ;# ok
++	.equ	UIMM_2_ILL, 3  ;# 3 is not a multiple of 2
++	.equ	UIMM_2_ZERO, 0 ;# UIMM = 00000 is illegal if U=1
++	.equ	UIMM_4, 4      ;# ok
++	.equ	UIMM_4_ILL, 3  ;# 3 is not a multiple of 4
++	.equ	UIMM_4_ZERO, 0 ;# UIMM = 00000 is illegal if U=1
++	.equ	UIMM_8, 8      ;# ok
++	.equ	UIMM_8_ILL, 7  ;# 7 is not a multiple of 8
++	.equ	UIMM_8_ZERO, 0 ;# UIMM = 00000 is illegal if U=1
++	.equ	offset, 0      ;# invalid offset
++	
++	zxtrw             rD, rA, rB, offset
++	zvsrhiu           rD, rA, UIMM_GT15
++	zvsrhis           rD, rA, UIMM_GT15
++	zvslhi            rD, rA, UIMM_GT15
++	zvrlhi            rD, rA, UIMM_GT15
++	zvslhius          rD, rA, UIMM_GT15
++	zvslhiss          rD, rA, UIMM_GT15
++	zldd              rD_odd, UIMM_8(rA)
++	zldd              rD, UIMM_8_ILL(rA)
++	zldw              rD_odd, UIMM_8(rA)
++	zldw              rD, UIMM_8_ILL(rA)
++	zldh              rD_odd, UIMM_8(rA)
++	zldh              rD, UIMM_8_ILL(rA)
++	zlwgsfd           rD_odd, UIMM_4(rA)
++	zlwgsfd           rD, UIMM_4_ILL(rA)
++	zlwwosd           rD_odd, UIMM_4(rA)
++	zlwwosd           rD, UIMM_4_ILL(rA)
++	zlwhsplatwd       rD_odd, UIMM_4(rA)
++	zlwhsplatwd       rD, UIMM_4_ILL(rA)
++	zlwhsplatd        rD_odd, UIMM_4(rA)
++	zlwhsplatd        rD, UIMM_4_ILL(rA)
++	zlwhgwsfd         rD_odd, UIMM_4(rA)
++	zlwhgwsfd         rD, UIMM_4_ILL(rA)
++	zlwhed            rD_odd, UIMM_4(rA)
++	zlwhed            rD, UIMM_4_ILL(rA)
++	zlwhosd           rD_odd, UIMM_4(rA)
++	zlwhosd           rD, UIMM_4_ILL(rA)
++	zlwhoud           rD_odd, UIMM_4(rA)
++	zlwh              rD, UIMM_4_ILL(rA)
++	zlww              rD, UIMM_4_ILL(rA)
++	zlhgwsf           rD, UIMM_2_ILL(rA)
++	zlhhsplat         rD, UIMM_2_ILL(rA)
++	zstdd             rS_odd, UIMM_8(rA)
++	zstdd             rS, UIMM_8_ILL(rA)
++	zstdw             rS_odd, UIMM_8(rA)
++	zstdw             rS, UIMM_8_ILL(rA)
++	zstdh             rS_odd, UIMM_8(rA)
++	zstdh             rS, UIMM_8_ILL(rA)
++	zstwhed           rS_odd, UIMM_4(rA)
++	zstwhed           rS, UIMM_4_ILL(rA)
++	zstwhod           rS_odd, UIMM_4(rA)
++	zstwhod           rS, UIMM_4_ILL(rA)
++	zlhhe             rD, UIMM_2_ILL(rA)
++	zlhhos            rD, UIMM_2_ILL(rA)
++	zlhhou            rD, UIMM_2_ILL(rA)
++	zsthe             rS, UIMM_2_ILL(rA)
++	zstho             rS, UIMM_2_ILL(rA)
++	zstwh             rS, UIMM_4_ILL(rA)
++	zstww             rS, UIMM_4_ILL(rA)
++	zlddu             rD_odd, UIMM_8(rA)
++	zlddu             rD, UIMM_8_ZERO(rA)
++	zldwu             rD_odd, UIMM_8(rA)
++	zldwu             rD, UIMM_8_ZERO(rA)
++	zldhu             rD_odd, UIMM_8(rA)
++	zldhu             rD, UIMM_8_ZERO(rA)
++	zlwgsfdu          rD_odd, UIMM_4(rA)
++	zlwgsfdu          rD, UIMM_4_ZERO(rA)
++	zlwwosdu          rD_odd, UIMM_4(rA)
++	zlwwosdu          rD, UIMM_4_ZERO(rA)
++	zlwhsplatwdu      rD_odd, UIMM_4(rA)
++	zlwhsplatwdu      rD, UIMM_4_ZERO(rA)
++	zlwhsplatdu       rD_odd, UIMM_4(rA)
++	zlwhsplatdu       rD, UIMM_4_ZERO(rA)
++	zlwhgwsfdu        rD_odd, UIMM_4(rA)
++	zlwhgwsfdu        rD, UIMM_4_ZERO(rA)
++	zlwhedu           rD_odd, UIMM_4(rA)
++	zlwhedu           rD, UIMM_4_ZERO(rA)
++	zlwhosdu          rD_odd, UIMM_4(rA)
++	zlwhosdu          rD, UIMM_4_ZERO(rA)
++	zlwhoudu          rD_odd, UIMM_4(rA)
++	zlwhoudu          rD, UIMM_4_ZERO(rA)
++	zlwhu             rD, UIMM_4_ZERO(rA)
++	zlwwu             rD, UIMM_4_ZERO(rA)
++	zlhgwsfu          rD, UIMM_2_ZERO(rA)
++	zlhhsplatu        rD, UIMM_2_ZERO(rA)
++	zstddu            rS, UIMM_8_ZERO(rA)
++	zstdwu            rS_odd, UIMM_8(rA)
++	zstdwu            rS, UIMM_8_ZERO(rA)
++	zstdhu            rS_odd, UIMM_8(rA)
++	zstdhu            rS, UIMM_8_ZERO(rA)
++	zstwhedu          rS_odd, UIMM_4(rA)
++	zstwhedu          rS, UIMM_4_ZERO(rA)
++	zstwhodu          rS_odd, UIMM_4(rA)
++	zstwhodu          rS, UIMM_4_ZERO(rA)
++	zlhheu            rD, UIMM_2_ZERO(rA)
++	zlhhosu           rD, UIMM_2_ZERO(rA)
++	zlhhouu           rD, UIMM_2_ZERO(rA)
++	zstheu            rS, UIMM_2_ZERO(rA)
++	zsthou            rS, UIMM_2_ZERO(rA)
++	zstwhu            rS, UIMM_4_ZERO(rA)
++	zstwwu            rS, UIMM_4_ZERO(rA)
+diff --git a/gas/testsuite/gas/ppc/lsp.d b/gas/testsuite/gas/ppc/lsp.d
+new file mode 100644
+index 0000000..c9fb476
+--- /dev/null
++++ b/gas/testsuite/gas/ppc/lsp.d
+@@ -0,0 +1,687 @@
++#as: -mvle
++#objdump: -d -Mvle
++#name: Validate LSP instructions
++
++.*: +file format elf.*-powerpc.*
++
++Disassembly of section .text:
++
++00000000 <.text>:
++   0:	10 01 7a 00 	zvaddih r0,r1,15
++   4:	10 01 7a 01 	zvsubifh r0,r1,15
++   8:	10 01 12 04 	zvaddh  r0,r1,r2
++   c:	10 01 12 05 	zvsubfh r0,r1,r2
++  10:	10 01 12 06 	zvaddsubfh r0,r1,r2
++  14:	10 01 12 07 	zvsubfaddh r0,r1,r2
++  18:	10 01 12 0c 	zvaddhx r0,r1,r2
++  1c:	10 01 12 0d 	zvsubfhx r0,r1,r2
++  20:	10 01 12 0e 	zvaddsubfhx r0,r1,r2
++  24:	10 01 12 0f 	zvsubfaddhx r0,r1,r2
++  28:	10 01 12 10 	zaddwus r0,r1,r2
++  2c:	10 01 12 11 	zsubfwus r0,r1,r2
++  30:	10 01 12 12 	zaddwss r0,r1,r2
++  34:	10 01 12 13 	zsubfwss r0,r1,r2
++  38:	10 01 12 14 	zvaddhus r0,r1,r2
++  3c:	10 01 12 15 	zvsubfhus r0,r1,r2
++  40:	10 01 12 16 	zvaddhss r0,r1,r2
++  44:	10 01 12 17 	zvsubfhss r0,r1,r2
++  48:	10 01 12 1a 	zvaddsubfhss r0,r1,r2
++  4c:	10 01 12 1b 	zvsubfaddhss r0,r1,r2
++  50:	10 01 12 1c 	zvaddhxss r0,r1,r2
++  54:	10 01 12 1d 	zvsubfhxss r0,r1,r2
++  58:	10 01 12 1e 	zvaddsubfhxss r0,r1,r2
++  5c:	10 01 12 1f 	zvsubfaddhxss r0,r1,r2
++  60:	10 01 12 20 	zaddheuw r0,r1,r2
++  64:	10 01 12 21 	zsubfheuw r0,r1,r2
++  68:	10 01 12 22 	zaddhesw r0,r1,r2
++  6c:	10 01 12 23 	zsubfhesw r0,r1,r2
++  70:	10 01 12 24 	zaddhouw r0,r1,r2
++  74:	10 01 12 25 	zsubfhouw r0,r1,r2
++  78:	10 01 12 26 	zaddhosw r0,r1,r2
++  7c:	10 01 12 27 	zsubfhosw r0,r1,r2
++  80:	10 01 12 2c 	zvmergehih r0,r1,r2
++  84:	10 01 12 2d 	zvmergeloh r0,r1,r2
++  88:	10 01 12 2e 	zvmergehiloh r0,r1,r2
++  8c:	10 01 12 2f 	zvmergelohih r0,r1,r2
++  90:	10 01 12 30 	zvcmpgthu cr0,r1,r2
++  94:	10 01 12 30 	zvcmpgthu cr0,r1,r2
++  98:	10 01 12 31 	zvcmplthu cr0,r1,r2
++  9c:	10 01 12 31 	zvcmplthu cr0,r1,r2
++  a0:	10 01 12 32 	zvcmpeqh cr0,r1,r2
++  a4:	10 01 12 38 	zpkswgshfrs r0,r1,r2
++  a8:	10 01 12 39 	zpkswgswfrs r0,r1,r2
++  ac:	10 01 12 3a 	zvpkshgwshfrs r0,r1,r2
++  b0:	10 01 12 3b 	zvpkswshfrs r0,r1,r2
++  b4:	10 01 12 3c 	zvpkswuhs r0,r1,r2
++  b8:	10 01 12 3d 	zvpkswshs r0,r1,r2
++  bc:	10 01 12 3e 	zvpkuwuhs r0,r1,r2
++  c0:	10 10 02 3f 	zvsplatih r0,-16
++  c4:	10 10 0a 3f 	zvsplatfih r0,-16
++  c8:	10 01 2a 3f 	zcntlsw r0,r1
++  cc:	10 01 32 3f 	zvcntlzh r0,r1
++  d0:	10 01 3a 3f 	zvcntlsh r0,r1
++  d4:	10 01 4a 3f 	znegws  r0,r1
++  d8:	10 01 52 3f 	zvnegh  r0,r1
++  dc:	10 01 5a 3f 	zvneghs r0,r1
++  e0:	10 01 62 3f 	zvnegho r0,r1
++  e4:	10 01 6a 3f 	zvneghos r0,r1
++  e8:	10 01 82 3f 	zrndwh  r0,r1
++  ec:	10 01 8a 3f 	zrndwhss r0,r1
++  f0:	10 01 a2 3f 	zvabsh  r0,r1
++  f4:	10 01 aa 3f 	zvabshs r0,r1
++  f8:	10 01 b2 3f 	zabsw   r0,r1
++  fc:	10 01 ba 3f 	zabsws  r0,r1
++ 100:	10 01 c2 3f 	zsatswuw r0,r1
++ 104:	10 01 ca 3f 	zsatuwsw r0,r1
++ 108:	10 01 d2 3f 	zsatswuh r0,r1
++ 10c:	10 01 da 3f 	zsatswsh r0,r1
++ 110:	10 01 e2 3f 	zvsatshuh r0,r1
++ 114:	10 01 ea 3f 	zvsatuhsh r0,r1
++ 118:	10 01 f2 3f 	zsatuwuh r0,r1
++ 11c:	10 01 fa 3f 	zsatuwsh r0,r1
++ 120:	10 01 12 60 	zsatsduw r0,r1,r2
++ 124:	10 01 12 61 	zsatsdsw r0,r1,r2
++ 128:	10 01 12 62 	zsatuduw r0,r1,r2
++ 12c:	10 01 12 64 	zvselh  r0,r1,r2
++ 130:	10 01 12 65 	zxtrw   r0,r1,r2,1
++ 134:	10 01 12 68 	zbrminc r0,r1,r2
++ 138:	10 01 12 69 	zcircinc r0,r1,r2
++ 13c:	10 01 12 6b 	zdivwsf r0,r1,r2
++ 140:	10 01 12 70 	zvsrhu  r0,r1,r2
++ 144:	10 01 12 71 	zvsrhs  r0,r1,r2
++ 148:	10 01 7a 72 	zvsrhiu r0,r1,15
++ 14c:	10 01 7a 73 	zvsrhis r0,r1,15
++ 150:	10 01 12 74 	zvslh   r0,r1,r2
++ 154:	10 01 12 75 	zvrlh   r0,r1,r2
++ 158:	10 01 7a 76 	zvslhi  r0,r1,15
++ 15c:	10 01 7a 77 	zvrlhi  r0,r1,15
++ 160:	10 01 12 78 	zvslhus r0,r1,r2
++ 164:	10 01 12 79 	zvslhss r0,r1,r2
++ 168:	10 01 7a 7a 	zvslhius r0,r1,15
++ 16c:	10 01 7a 7b 	zvslhiss r0,r1,15
++ 170:	10 01 12 7c 	zslwus  r0,r1,r2
++ 174:	10 01 12 7d 	zslwss  r0,r1,r2
++ 178:	10 01 7a 7e 	zslwius r0,r1,15
++ 17c:	10 01 7a 7f 	zslwiss r0,r1,15
++ 180:	10 01 14 60 	zaddwgui r0,r1,r2
++ 184:	10 01 14 61 	zsubfwgui r0,r1,r2
++ 188:	10 01 14 62 	zaddd   r0,r1,r2
++ 18c:	10 01 14 63 	zsubfd  r0,r1,r2
++ 190:	10 01 14 64 	zvaddsubfw r0,r1,r2
++ 194:	10 01 14 65 	zvsubfaddw r0,r1,r2
++ 198:	10 01 14 66 	zvaddw  r0,r1,r2
++ 19c:	10 01 14 67 	zvsubfw r0,r1,r2
++ 1a0:	10 01 14 68 	zaddwgsi r0,r1,r2
++ 1a4:	10 01 14 69 	zsubfwgsi r0,r1,r2
++ 1a8:	10 01 14 6a 	zadddss r0,r1,r2
++ 1ac:	10 01 14 6b 	zsubfdss r0,r1,r2
++ 1b0:	10 01 14 6c 	zvaddsubfwss r0,r1,r2
++ 1b4:	10 01 14 6d 	zvsubfaddwss r0,r1,r2
++ 1b8:	10 01 14 6e 	zvaddwss r0,r1,r2
++ 1bc:	10 01 14 6f 	zvsubfwss r0,r1,r2
++ 1c0:	10 01 14 70 	zaddwgsf r0,r1,r2
++ 1c4:	10 01 14 71 	zsubfwgsf r0,r1,r2
++ 1c8:	10 01 14 72 	zadddus r0,r1,r2
++ 1cc:	10 01 14 73 	zsubfdus r0,r1,r2
++ 1d0:	10 01 14 76 	zvaddwus r0,r1,r2
++ 1d4:	10 01 14 77 	zvsubfwus r0,r1,r2
++ 1d8:	10 01 04 78 	zvunpkhgwsf r0,r1
++ 1dc:	10 01 0c 78 	zvunpkhsf r0,r1
++ 1e0:	10 01 14 78 	zvunpkhui r0,r1
++ 1e4:	10 01 1c 78 	zvunpkhsi r0,r1
++ 1e8:	10 01 24 78 	zunpkwgsf r0,r1
++ 1ec:	10 01 14 88 	zvdotphgwasmf r0,r1,r2
++ 1f0:	10 01 14 89 	zvdotphgwasmfr r0,r1,r2
++ 1f4:	10 01 14 8a 	zvdotphgwasmfaa r0,r1,r2
++ 1f8:	10 01 14 8b 	zvdotphgwasmfraa r0,r1,r2
++ 1fc:	10 01 14 8c 	zvdotphgwasmfan r0,r1,r2
++ 200:	10 01 14 8d 	zvdotphgwasmfran r0,r1,r2
++ 204:	10 01 14 90 	zvmhulgwsmf r0,r1,r2
++ 208:	10 01 14 91 	zvmhulgwsmfr r0,r1,r2
++ 20c:	10 01 14 92 	zvmhulgwsmfaa r0,r1,r2
++ 210:	10 01 14 93 	zvmhulgwsmfraa r0,r1,r2
++ 214:	10 01 14 94 	zvmhulgwsmfan r0,r1,r2
++ 218:	10 01 14 95 	zvmhulgwsmfran r0,r1,r2
++ 21c:	10 01 14 96 	zvmhulgwsmfanp r0,r1,r2
++ 220:	10 01 14 97 	zvmhulgwsmfranp r0,r1,r2
++ 224:	10 01 14 98 	zmhegwsmf r0,r1,r2
++ 228:	10 01 14 99 	zmhegwsmfr r0,r1,r2
++ 22c:	10 01 14 9a 	zmhegwsmfaa r0,r1,r2
++ 230:	10 01 14 9b 	zmhegwsmfraa r0,r1,r2
++ 234:	10 01 14 9c 	zmhegwsmfan r0,r1,r2
++ 238:	10 01 14 9d 	zmhegwsmfran r0,r1,r2
++ 23c:	10 01 14 a8 	zvdotphxgwasmf r0,r1,r2
++ 240:	10 01 14 a9 	zvdotphxgwasmfr r0,r1,r2
++ 244:	10 01 14 aa 	zvdotphxgwasmfaa r0,r1,r2
++ 248:	10 01 14 ab 	zvdotphxgwasmfraa r0,r1,r2
++ 24c:	10 01 14 ac 	zvdotphxgwasmfan r0,r1,r2
++ 250:	10 01 14 ad 	zvdotphxgwasmfran r0,r1,r2
++ 254:	10 01 14 b0 	zvmhllgwsmf r0,r1,r2
++ 258:	10 01 14 b1 	zvmhllgwsmfr r0,r1,r2
++ 25c:	10 01 14 b2 	zvmhllgwsmfaa r0,r1,r2
++ 260:	10 01 14 b3 	zvmhllgwsmfraa r0,r1,r2
++ 264:	10 01 14 b4 	zvmhllgwsmfan r0,r1,r2
++ 268:	10 01 14 b5 	zvmhllgwsmfran r0,r1,r2
++ 26c:	10 01 14 b6 	zvmhllgwsmfanp r0,r1,r2
++ 270:	10 01 14 b7 	zvmhllgwsmfranp r0,r1,r2
++ 274:	10 01 14 b8 	zmheogwsmf r0,r1,r2
++ 278:	10 01 14 b9 	zmheogwsmfr r0,r1,r2
++ 27c:	10 01 14 ba 	zmheogwsmfaa r0,r1,r2
++ 280:	10 01 14 bb 	zmheogwsmfraa r0,r1,r2
++ 284:	10 01 14 bc 	zmheogwsmfan r0,r1,r2
++ 288:	10 01 14 bd 	zmheogwsmfran r0,r1,r2
++ 28c:	10 01 14 c8 	zvdotphgwssmf r0,r1,r2
++ 290:	10 01 14 c9 	zvdotphgwssmfr r0,r1,r2
++ 294:	10 01 14 ca 	zvdotphgwssmfaa r0,r1,r2
++ 298:	10 01 14 cb 	zvdotphgwssmfraa r0,r1,r2
++ 29c:	10 01 14 cc 	zvdotphgwssmfan r0,r1,r2
++ 2a0:	10 01 14 cd 	zvdotphgwssmfran r0,r1,r2
++ 2a4:	10 01 14 d0 	zvmhuugwsmf r0,r1,r2
++ 2a8:	10 01 14 d1 	zvmhuugwsmfr r0,r1,r2
++ 2ac:	10 01 14 d2 	zvmhuugwsmfaa r0,r1,r2
++ 2b0:	10 01 14 d3 	zvmhuugwsmfraa r0,r1,r2
++ 2b4:	10 01 14 d4 	zvmhuugwsmfan r0,r1,r2
++ 2b8:	10 01 14 d5 	zvmhuugwsmfran r0,r1,r2
++ 2bc:	10 01 14 d6 	zvmhuugwsmfanp r0,r1,r2
++ 2c0:	10 01 14 d7 	zvmhuugwsmfranp r0,r1,r2
++ 2c4:	10 01 14 d8 	zmhogwsmf r0,r1,r2
++ 2c8:	10 01 14 d9 	zmhogwsmfr r0,r1,r2
++ 2cc:	10 01 14 da 	zmhogwsmfaa r0,r1,r2
++ 2d0:	10 01 14 db 	zmhogwsmfraa r0,r1,r2
++ 2d4:	10 01 14 dc 	zmhogwsmfan r0,r1,r2
++ 2d8:	10 01 14 dd 	zmhogwsmfran r0,r1,r2
++ 2dc:	10 01 14 f0 	zvmhxlgwsmf r0,r1,r2
++ 2e0:	10 01 14 f1 	zvmhxlgwsmfr r0,r1,r2
++ 2e4:	10 01 14 f2 	zvmhxlgwsmfaa r0,r1,r2
++ 2e8:	10 01 14 f3 	zvmhxlgwsmfraa r0,r1,r2
++ 2ec:	10 01 14 f4 	zvmhxlgwsmfan r0,r1,r2
++ 2f0:	10 01 14 f5 	zvmhxlgwsmfran r0,r1,r2
++ 2f4:	10 01 14 f6 	zvmhxlgwsmfanp r0,r1,r2
++ 2f8:	10 01 14 f7 	zvmhxlgwsmfranp r0,r1,r2
++ 2fc:	10 01 15 00 	zmhegui r0,r1,r2
++ 300:	10 01 15 01 	zvdotphgaui r0,r1,r2
++ 304:	10 01 15 02 	zmheguiaa r0,r1,r2
++ 308:	10 01 15 03 	zvdotphgauiaa r0,r1,r2
++ 30c:	10 01 15 04 	zmheguian r0,r1,r2
++ 310:	10 01 15 05 	zvdotphgauian r0,r1,r2
++ 314:	10 01 15 08 	zmhegsi r0,r1,r2
++ 318:	10 01 15 09 	zvdotphgasi r0,r1,r2
++ 31c:	10 01 15 0a 	zmhegsiaa r0,r1,r2
++ 320:	10 01 15 0b 	zvdotphgasiaa r0,r1,r2
++ 324:	10 01 15 0c 	zmhegsian r0,r1,r2
++ 328:	10 01 15 0d 	zvdotphgasian r0,r1,r2
++ 32c:	10 01 15 10 	zmhegsui r0,r1,r2
++ 330:	10 01 15 11 	zvdotphgasui r0,r1,r2
++ 334:	10 01 15 12 	zmhegsuiaa r0,r1,r2
++ 338:	10 01 15 13 	zvdotphgasuiaa r0,r1,r2
++ 33c:	10 01 15 14 	zmhegsuian r0,r1,r2
++ 340:	10 01 15 15 	zvdotphgasuian r0,r1,r2
++ 344:	10 01 15 18 	zmhegsmf r0,r1,r2
++ 348:	10 01 15 19 	zvdotphgasmf r0,r1,r2
++ 34c:	10 01 15 1a 	zmhegsmfaa r0,r1,r2
++ 350:	10 01 15 1b 	zvdotphgasmfaa r0,r1,r2
++ 354:	10 01 15 1c 	zmhegsmfan r0,r1,r2
++ 358:	10 01 15 1d 	zvdotphgasmfan r0,r1,r2
++ 35c:	10 01 15 20 	zmheogui r0,r1,r2
++ 360:	10 01 15 21 	zvdotphxgaui r0,r1,r2
++ 364:	10 01 15 22 	zmheoguiaa r0,r1,r2
++ 368:	10 01 15 23 	zvdotphxgauiaa r0,r1,r2
++ 36c:	10 01 15 24 	zmheoguian r0,r1,r2
++ 370:	10 01 15 25 	zvdotphxgauian r0,r1,r2
++ 374:	10 01 15 28 	zmheogsi r0,r1,r2
++ 378:	10 01 15 29 	zvdotphxgasi r0,r1,r2
++ 37c:	10 01 15 2a 	zmheogsiaa r0,r1,r2
++ 380:	10 01 15 2b 	zvdotphxgasiaa r0,r1,r2
++ 384:	10 01 15 2c 	zmheogsian r0,r1,r2
++ 388:	10 01 15 2d 	zvdotphxgasian r0,r1,r2
++ 38c:	10 01 15 30 	zmheogsui r0,r1,r2
++ 390:	10 01 15 31 	zvdotphxgasui r0,r1,r2
++ 394:	10 01 15 32 	zmheogsuiaa r0,r1,r2
++ 398:	10 01 15 33 	zvdotphxgasuiaa r0,r1,r2
++ 39c:	10 01 15 34 	zmheogsuian r0,r1,r2
++ 3a0:	10 01 15 35 	zvdotphxgasuian r0,r1,r2
++ 3a4:	10 01 15 38 	zmheogsmf r0,r1,r2
++ 3a8:	10 01 15 39 	zvdotphxgasmf r0,r1,r2
++ 3ac:	10 01 15 3a 	zmheogsmfaa r0,r1,r2
++ 3b0:	10 01 15 3b 	zvdotphxgasmfaa r0,r1,r2
++ 3b4:	10 01 15 3c 	zmheogsmfan r0,r1,r2
++ 3b8:	10 01 15 3d 	zvdotphxgasmfan r0,r1,r2
++ 3bc:	10 01 15 40 	zmhogui r0,r1,r2
++ 3c0:	10 01 15 41 	zvdotphgsui r0,r1,r2
++ 3c4:	10 01 15 42 	zmhoguiaa r0,r1,r2
++ 3c8:	10 01 15 43 	zvdotphgsuiaa r0,r1,r2
++ 3cc:	10 01 15 44 	zmhoguian r0,r1,r2
++ 3d0:	10 01 15 45 	zvdotphgsuian r0,r1,r2
++ 3d4:	10 01 15 48 	zmhogsi r0,r1,r2
++ 3d8:	10 01 15 49 	zvdotphgssi r0,r1,r2
++ 3dc:	10 01 15 4a 	zmhogsiaa r0,r1,r2
++ 3e0:	10 01 15 4b 	zvdotphgssiaa r0,r1,r2
++ 3e4:	10 01 15 4c 	zmhogsian r0,r1,r2
++ 3e8:	10 01 15 4d 	zvdotphgssian r0,r1,r2
++ 3ec:	10 01 15 50 	zmhogsui r0,r1,r2
++ 3f0:	10 01 15 51 	zvdotphgssui r0,r1,r2
++ 3f4:	10 01 15 52 	zmhogsuiaa r0,r1,r2
++ 3f8:	10 01 15 53 	zvdotphgssuiaa r0,r1,r2
++ 3fc:	10 01 15 54 	zmhogsuian r0,r1,r2
++ 400:	10 01 15 55 	zvdotphgssuian r0,r1,r2
++ 404:	10 01 15 58 	zmhogsmf r0,r1,r2
++ 408:	10 01 15 59 	zvdotphgssmf r0,r1,r2
++ 40c:	10 01 15 5a 	zmhogsmfaa r0,r1,r2
++ 410:	10 01 15 5b 	zvdotphgssmfaa r0,r1,r2
++ 414:	10 01 15 5c 	zmhogsmfan r0,r1,r2
++ 418:	10 01 15 5d 	zvdotphgssmfan r0,r1,r2
++ 41c:	10 01 15 60 	zmwgui  r0,r1,r2
++ 420:	10 01 15 62 	zmwguiaa r0,r1,r2
++ 424:	10 01 15 63 	zmwguiaas r0,r1,r2
++ 428:	10 01 15 64 	zmwguian r0,r1,r2
++ 42c:	10 01 15 65 	zmwguians r0,r1,r2
++ 430:	10 01 15 68 	zmwgsi  r0,r1,r2
++ 434:	10 01 15 6a 	zmwgsiaa r0,r1,r2
++ 438:	10 01 15 6b 	zmwgsiaas r0,r1,r2
++ 43c:	10 01 15 6c 	zmwgsian r0,r1,r2
++ 440:	10 01 15 6d 	zmwgsians r0,r1,r2
++ 444:	10 01 15 70 	zmwgsui r0,r1,r2
++ 448:	10 01 15 72 	zmwgsuiaa r0,r1,r2
++ 44c:	10 01 15 73 	zmwgsuiaas r0,r1,r2
++ 450:	10 01 15 74 	zmwgsuian r0,r1,r2
++ 454:	10 01 15 75 	zmwgsuians r0,r1,r2
++ 458:	10 01 15 78 	zmwgsmf r0,r1,r2
++ 45c:	10 01 15 79 	zmwgsmfr r0,r1,r2
++ 460:	10 01 15 7a 	zmwgsmfaa r0,r1,r2
++ 464:	10 01 15 7b 	zmwgsmfraa r0,r1,r2
++ 468:	10 01 15 7c 	zmwgsmfan r0,r1,r2
++ 46c:	10 01 15 7d 	zmwgsmfran r0,r1,r2
++ 470:	10 01 15 80 	zvmhului r0,r1,r2
++ 474:	10 01 15 82 	zvmhuluiaa r0,r1,r2
++ 478:	10 01 15 83 	zvmhuluiaas r0,r1,r2
++ 47c:	10 01 15 84 	zvmhuluian r0,r1,r2
++ 480:	10 01 15 85 	zvmhuluians r0,r1,r2
++ 484:	10 01 15 86 	zvmhuluianp r0,r1,r2
++ 488:	10 01 15 87 	zvmhuluianps r0,r1,r2
++ 48c:	10 01 15 88 	zvmhulsi r0,r1,r2
++ 490:	10 01 15 8a 	zvmhulsiaa r0,r1,r2
++ 494:	10 01 15 8b 	zvmhulsiaas r0,r1,r2
++ 498:	10 01 15 8c 	zvmhulsian r0,r1,r2
++ 49c:	10 01 15 8d 	zvmhulsians r0,r1,r2
++ 4a0:	10 01 15 8e 	zvmhulsianp r0,r1,r2
++ 4a4:	10 01 15 8f 	zvmhulsianps r0,r1,r2
++ 4a8:	10 01 15 90 	zvmhulsui r0,r1,r2
++ 4ac:	10 01 15 92 	zvmhulsuiaa r0,r1,r2
++ 4b0:	10 01 15 93 	zvmhulsuiaas r0,r1,r2
++ 4b4:	10 01 15 94 	zvmhulsuian r0,r1,r2
++ 4b8:	10 01 15 95 	zvmhulsuians r0,r1,r2
++ 4bc:	10 01 15 96 	zvmhulsuianp r0,r1,r2
++ 4c0:	10 01 15 97 	zvmhulsuianps r0,r1,r2
++ 4c4:	10 01 15 98 	zvmhulsf r0,r1,r2
++ 4c8:	10 01 15 99 	zvmhulsfr r0,r1,r2
++ 4cc:	10 01 15 9a 	zvmhulsfaas r0,r1,r2
++ 4d0:	10 01 15 9b 	zvmhulsfraas r0,r1,r2
++ 4d4:	10 01 15 9c 	zvmhulsfans r0,r1,r2
++ 4d8:	10 01 15 9d 	zvmhulsfrans r0,r1,r2
++ 4dc:	10 01 15 9e 	zvmhulsfanps r0,r1,r2
++ 4e0:	10 01 15 9f 	zvmhulsfranps r0,r1,r2
++ 4e4:	10 01 15 a0 	zvmhllui r0,r1,r2
++ 4e8:	10 01 15 a2 	zvmhlluiaa r0,r1,r2
++ 4ec:	10 01 15 a3 	zvmhlluiaas r0,r1,r2
++ 4f0:	10 01 15 a4 	zvmhlluian r0,r1,r2
++ 4f4:	10 01 15 a5 	zvmhlluians r0,r1,r2
++ 4f8:	10 01 15 a6 	zvmhlluianp r0,r1,r2
++ 4fc:	10 01 15 a7 	zvmhlluianps r0,r1,r2
++ 500:	10 01 15 a8 	zvmhllsi r0,r1,r2
++ 504:	10 01 15 aa 	zvmhllsiaa r0,r1,r2
++ 508:	10 01 15 ab 	zvmhllsiaas r0,r1,r2
++ 50c:	10 01 15 ac 	zvmhllsian r0,r1,r2
++ 510:	10 01 15 ad 	zvmhllsians r0,r1,r2
++ 514:	10 01 15 ae 	zvmhllsianp r0,r1,r2
++ 518:	10 01 15 af 	zvmhllsianps r0,r1,r2
++ 51c:	10 01 15 b0 	zvmhllsui r0,r1,r2
++ 520:	10 01 15 b2 	zvmhllsuiaa r0,r1,r2
++ 524:	10 01 15 b3 	zvmhllsuiaas r0,r1,r2
++ 528:	10 01 15 b4 	zvmhllsuian r0,r1,r2
++ 52c:	10 01 15 b5 	zvmhllsuians r0,r1,r2
++ 530:	10 01 15 b6 	zvmhllsuianp r0,r1,r2
++ 534:	10 01 15 b7 	zvmhllsuianps r0,r1,r2
++ 538:	10 01 15 b8 	zvmhllsf r0,r1,r2
++ 53c:	10 01 15 b9 	zvmhllsfr r0,r1,r2
++ 540:	10 01 15 ba 	zvmhllsfaas r0,r1,r2
++ 544:	10 01 15 bb 	zvmhllsfraas r0,r1,r2
++ 548:	10 01 15 bc 	zvmhllsfans r0,r1,r2
++ 54c:	10 01 15 bd 	zvmhllsfrans r0,r1,r2
++ 550:	10 01 15 be 	zvmhllsfanps r0,r1,r2
++ 554:	10 01 15 bf 	zvmhllsfranps r0,r1,r2
++ 558:	10 01 15 c0 	zvmhuuui r0,r1,r2
++ 55c:	10 01 15 c2 	zvmhuuuiaa r0,r1,r2
++ 560:	10 01 15 c3 	zvmhuuuiaas r0,r1,r2
++ 564:	10 01 15 c4 	zvmhuuuian r0,r1,r2
++ 568:	10 01 15 c5 	zvmhuuuians r0,r1,r2
++ 56c:	10 01 15 c6 	zvmhuuuianp r0,r1,r2
++ 570:	10 01 15 c7 	zvmhuuuianps r0,r1,r2
++ 574:	10 01 15 c8 	zvmhuusi r0,r1,r2
++ 578:	10 01 15 ca 	zvmhuusiaa r0,r1,r2
++ 57c:	10 01 15 cb 	zvmhuusiaas r0,r1,r2
++ 580:	10 01 15 cc 	zvmhuusian r0,r1,r2
++ 584:	10 01 15 cd 	zvmhuusians r0,r1,r2
++ 588:	10 01 15 ce 	zvmhuusianp r0,r1,r2
++ 58c:	10 01 15 cf 	zvmhuusianps r0,r1,r2
++ 590:	10 01 15 d0 	zvmhuusui r0,r1,r2
++ 594:	10 01 15 d2 	zvmhuusuiaa r0,r1,r2
++ 598:	10 01 15 d3 	zvmhuusuiaas r0,r1,r2
++ 59c:	10 01 15 d4 	zvmhuusuian r0,r1,r2
++ 5a0:	10 01 15 d5 	zvmhuusuians r0,r1,r2
++ 5a4:	10 01 15 d6 	zvmhuusuianp r0,r1,r2
++ 5a8:	10 01 15 d7 	zvmhuusuianps r0,r1,r2
++ 5ac:	10 01 15 d8 	zvmhuusf r0,r1,r2
++ 5b0:	10 01 15 d9 	zvmhuusfr r0,r1,r2
++ 5b4:	10 01 15 da 	zvmhuusfaas r0,r1,r2
++ 5b8:	10 01 15 db 	zvmhuusfraas r0,r1,r2
++ 5bc:	10 01 15 dc 	zvmhuusfans r0,r1,r2
++ 5c0:	10 01 15 dd 	zvmhuusfrans r0,r1,r2
++ 5c4:	10 01 15 de 	zvmhuusfanps r0,r1,r2
++ 5c8:	10 01 15 df 	zvmhuusfranps r0,r1,r2
++ 5cc:	10 01 15 e0 	zvmhxlui r0,r1,r2
++ 5d0:	10 01 15 e2 	zvmhxluiaa r0,r1,r2
++ 5d4:	10 01 15 e3 	zvmhxluiaas r0,r1,r2
++ 5d8:	10 01 15 e4 	zvmhxluian r0,r1,r2
++ 5dc:	10 01 15 e5 	zvmhxluians r0,r1,r2
++ 5e0:	10 01 15 e6 	zvmhxluianp r0,r1,r2
++ 5e4:	10 01 15 e7 	zvmhxluianps r0,r1,r2
++ 5e8:	10 01 15 e8 	zvmhxlsi r0,r1,r2
++ 5ec:	10 01 15 ea 	zvmhxlsiaa r0,r1,r2
++ 5f0:	10 01 15 eb 	zvmhxlsiaas r0,r1,r2
++ 5f4:	10 01 15 ec 	zvmhxlsian r0,r1,r2
++ 5f8:	10 01 15 ed 	zvmhxlsians r0,r1,r2
++ 5fc:	10 01 15 ee 	zvmhxlsianp r0,r1,r2
++ 600:	10 01 15 ef 	zvmhxlsianps r0,r1,r2
++ 604:	10 01 15 f0 	zvmhxlsui r0,r1,r2
++ 608:	10 01 15 f2 	zvmhxlsuiaa r0,r1,r2
++ 60c:	10 01 15 f3 	zvmhxlsuiaas r0,r1,r2
++ 610:	10 01 15 f4 	zvmhxlsuian r0,r1,r2
++ 614:	10 01 15 f5 	zvmhxlsuians r0,r1,r2
++ 618:	10 01 15 f6 	zvmhxlsuianp r0,r1,r2
++ 61c:	10 01 15 f7 	zvmhxlsuianps r0,r1,r2
++ 620:	10 01 15 f8 	zvmhxlsf r0,r1,r2
++ 624:	10 01 15 f9 	zvmhxlsfr r0,r1,r2
++ 628:	10 01 15 fa 	zvmhxlsfaas r0,r1,r2
++ 62c:	10 01 15 fb 	zvmhxlsfraas r0,r1,r2
++ 630:	10 01 15 fc 	zvmhxlsfans r0,r1,r2
++ 634:	10 01 15 fd 	zvmhxlsfrans r0,r1,r2
++ 638:	10 01 15 fe 	zvmhxlsfanps r0,r1,r2
++ 63c:	10 01 15 ff 	zvmhxlsfranps r0,r1,r2
++ 640:	10 01 16 00 	zmheui  r0,r1,r2
++ 644:	10 01 16 02 	zmheuiaa r0,r1,r2
++ 648:	10 01 16 03 	zmheuiaas r0,r1,r2
++ 64c:	10 01 16 04 	zmheuian r0,r1,r2
++ 650:	10 01 16 05 	zmheuians r0,r1,r2
++ 654:	10 01 16 08 	zmhesi  r0,r1,r2
++ 658:	10 01 16 0a 	zmhesiaa r0,r1,r2
++ 65c:	10 01 16 0b 	zmhesiaas r0,r1,r2
++ 660:	10 01 16 0c 	zmhesian r0,r1,r2
++ 664:	10 01 16 0d 	zmhesians r0,r1,r2
++ 668:	10 01 16 10 	zmhesui r0,r1,r2
++ 66c:	10 01 16 12 	zmhesuiaa r0,r1,r2
++ 670:	10 01 16 13 	zmhesuiaas r0,r1,r2
++ 674:	10 01 16 14 	zmhesuian r0,r1,r2
++ 678:	10 01 16 15 	zmhesuians r0,r1,r2
++ 67c:	10 01 16 18 	zmhesf  r0,r1,r2
++ 680:	10 01 16 19 	zmhesfr r0,r1,r2
++ 684:	10 01 16 1a 	zmhesfaas r0,r1,r2
++ 688:	10 01 16 1b 	zmhesfraas r0,r1,r2
++ 68c:	10 01 16 1c 	zmhesfans r0,r1,r2
++ 690:	10 01 16 1d 	zmhesfrans r0,r1,r2
++ 694:	10 01 16 20 	zmheoui r0,r1,r2
++ 698:	10 01 16 22 	zmheouiaa r0,r1,r2
++ 69c:	10 01 16 23 	zmheouiaas r0,r1,r2
++ 6a0:	10 01 16 24 	zmheouian r0,r1,r2
++ 6a4:	10 01 16 25 	zmheouians r0,r1,r2
++ 6a8:	10 01 16 28 	zmheosi r0,r1,r2
++ 6ac:	10 01 16 2a 	zmheosiaa r0,r1,r2
++ 6b0:	10 01 16 2b 	zmheosiaas r0,r1,r2
++ 6b4:	10 01 16 2c 	zmheosian r0,r1,r2
++ 6b8:	10 01 16 2d 	zmheosians r0,r1,r2
++ 6bc:	10 01 16 30 	zmheosui r0,r1,r2
++ 6c0:	10 01 16 32 	zmheosuiaa r0,r1,r2
++ 6c4:	10 01 16 33 	zmheosuiaas r0,r1,r2
++ 6c8:	10 01 16 34 	zmheosuian r0,r1,r2
++ 6cc:	10 01 16 35 	zmheosuians r0,r1,r2
++ 6d0:	10 01 16 38 	zmheosf r0,r1,r2
++ 6d4:	10 01 16 39 	zmheosfr r0,r1,r2
++ 6d8:	10 01 16 3a 	zmheosfaas r0,r1,r2
++ 6dc:	10 01 16 3b 	zmheosfraas r0,r1,r2
++ 6e0:	10 01 16 3c 	zmheosfans r0,r1,r2
++ 6e4:	10 01 16 3d 	zmheosfrans r0,r1,r2
++ 6e8:	10 01 16 40 	zmhoui  r0,r1,r2
++ 6ec:	10 01 16 42 	zmhouiaa r0,r1,r2
++ 6f0:	10 01 16 43 	zmhouiaas r0,r1,r2
++ 6f4:	10 01 16 44 	zmhouian r0,r1,r2
++ 6f8:	10 01 16 45 	zmhouians r0,r1,r2
++ 6fc:	10 01 16 48 	zmhosi  r0,r1,r2
++ 700:	10 01 16 4a 	zmhosiaa r0,r1,r2
++ 704:	10 01 16 4b 	zmhosiaas r0,r1,r2
++ 708:	10 01 16 4c 	zmhosian r0,r1,r2
++ 70c:	10 01 16 4d 	zmhosians r0,r1,r2
++ 710:	10 01 16 50 	zmhosui r0,r1,r2
++ 714:	10 01 16 52 	zmhosuiaa r0,r1,r2
++ 718:	10 01 16 53 	zmhosuiaas r0,r1,r2
++ 71c:	10 01 16 54 	zmhosuian r0,r1,r2
++ 720:	10 01 16 55 	zmhosuians r0,r1,r2
++ 724:	10 01 16 58 	zmhosf  r0,r1,r2
++ 728:	10 01 16 59 	zmhosfr r0,r1,r2
++ 72c:	10 01 16 5a 	zmhosfaas r0,r1,r2
++ 730:	10 01 16 5b 	zmhosfraas r0,r1,r2
++ 734:	10 01 16 5c 	zmhosfans r0,r1,r2
++ 738:	10 01 16 5d 	zmhosfrans r0,r1,r2
++ 73c:	10 01 16 60 	zvmhuih r0,r1,r2
++ 740:	10 01 16 61 	zvmhuihs r0,r1,r2
++ 744:	10 01 16 62 	zvmhuiaah r0,r1,r2
++ 748:	10 01 16 63 	zvmhuiaahs r0,r1,r2
++ 74c:	10 01 16 64 	zvmhuianh r0,r1,r2
++ 750:	10 01 16 65 	zvmhuianhs r0,r1,r2
++ 754:	10 01 16 69 	zvmhsihs r0,r1,r2
++ 758:	10 01 16 6b 	zvmhsiaahs r0,r1,r2
++ 75c:	10 01 16 6d 	zvmhsianhs r0,r1,r2
++ 760:	10 01 16 71 	zvmhsuihs r0,r1,r2
++ 764:	10 01 16 73 	zvmhsuiaahs r0,r1,r2
++ 768:	10 01 16 75 	zvmhsuianhs r0,r1,r2
++ 76c:	10 01 16 78 	zvmhsfh r0,r1,r2
++ 770:	10 01 16 79 	zvmhsfrh r0,r1,r2
++ 774:	10 01 16 7a 	zvmhsfaahs r0,r1,r2
++ 778:	10 01 16 7b 	zvmhsfraahs r0,r1,r2
++ 77c:	10 01 16 7c 	zvmhsfanhs r0,r1,r2
++ 780:	10 01 16 7d 	zvmhsfranhs r0,r1,r2
++ 784:	10 01 16 80 	zvdotphaui r0,r1,r2
++ 788:	10 01 16 81 	zvdotphauis r0,r1,r2
++ 78c:	10 01 16 82 	zvdotphauiaa r0,r1,r2
++ 790:	10 01 16 83 	zvdotphauiaas r0,r1,r2
++ 794:	10 01 16 84 	zvdotphauian r0,r1,r2
++ 798:	10 01 16 85 	zvdotphauians r0,r1,r2
++ 79c:	10 01 16 88 	zvdotphasi r0,r1,r2
++ 7a0:	10 01 16 89 	zvdotphasis r0,r1,r2
++ 7a4:	10 01 16 8a 	zvdotphasiaa r0,r1,r2
++ 7a8:	10 01 16 8b 	zvdotphasiaas r0,r1,r2
++ 7ac:	10 01 16 8c 	zvdotphasian r0,r1,r2
++ 7b0:	10 01 16 8d 	zvdotphasians r0,r1,r2
++ 7b4:	10 01 16 90 	zvdotphasui r0,r1,r2
++ 7b8:	10 01 16 91 	zvdotphasuis r0,r1,r2
++ 7bc:	10 01 16 92 	zvdotphasuiaa r0,r1,r2
++ 7c0:	10 01 16 93 	zvdotphasuiaas r0,r1,r2
++ 7c4:	10 01 16 94 	zvdotphasuian r0,r1,r2
++ 7c8:	10 01 16 95 	zvdotphasuians r0,r1,r2
++ 7cc:	10 01 16 98 	zvdotphasfs r0,r1,r2
++ 7d0:	10 01 16 99 	zvdotphasfrs r0,r1,r2
++ 7d4:	10 01 16 9a 	zvdotphasfaas r0,r1,r2
++ 7d8:	10 01 16 9b 	zvdotphasfraas r0,r1,r2
++ 7dc:	10 01 16 9c 	zvdotphasfans r0,r1,r2
++ 7e0:	10 01 16 9d 	zvdotphasfrans r0,r1,r2
++ 7e4:	10 01 16 a0 	zvdotphxaui r0,r1,r2
++ 7e8:	10 01 16 a1 	zvdotphxauis r0,r1,r2
++ 7ec:	10 01 16 a2 	zvdotphxauiaa r0,r1,r2
++ 7f0:	10 01 16 a3 	zvdotphxauiaas r0,r1,r2
++ 7f4:	10 01 16 a4 	zvdotphxauian r0,r1,r2
++ 7f8:	10 01 16 a5 	zvdotphxauians r0,r1,r2
++ 7fc:	10 01 16 a8 	zvdotphxasi r0,r1,r2
++ 800:	10 01 16 a9 	zvdotphxasis r0,r1,r2
++ 804:	10 01 16 aa 	zvdotphxasiaa r0,r1,r2
++ 808:	10 01 16 ab 	zvdotphxasiaas r0,r1,r2
++ 80c:	10 01 16 ac 	zvdotphxasian r0,r1,r2
++ 810:	10 01 16 ad 	zvdotphxasians r0,r1,r2
++ 814:	10 01 16 b0 	zvdotphxasui r0,r1,r2
++ 818:	10 01 16 b1 	zvdotphxasuis r0,r1,r2
++ 81c:	10 01 16 b2 	zvdotphxasuiaa r0,r1,r2
++ 820:	10 01 16 b3 	zvdotphxasuiaas r0,r1,r2
++ 824:	10 01 16 b4 	zvdotphxasuian r0,r1,r2
++ 828:	10 01 16 b5 	zvdotphxasuians r0,r1,r2
++ 82c:	10 01 16 b8 	zvdotphxasfs r0,r1,r2
++ 830:	10 01 16 b9 	zvdotphxasfrs r0,r1,r2
++ 834:	10 01 16 ba 	zvdotphxasfaas r0,r1,r2
++ 838:	10 01 16 bb 	zvdotphxasfraas r0,r1,r2
++ 83c:	10 01 16 bc 	zvdotphxasfans r0,r1,r2
++ 840:	10 01 16 bd 	zvdotphxasfrans r0,r1,r2
++ 844:	10 01 16 c0 	zvdotphsui r0,r1,r2
++ 848:	10 01 16 c1 	zvdotphsuis r0,r1,r2
++ 84c:	10 01 16 c2 	zvdotphsuiaa r0,r1,r2
++ 850:	10 01 16 c3 	zvdotphsuiaas r0,r1,r2
++ 854:	10 01 16 c4 	zvdotphsuian r0,r1,r2
++ 858:	10 01 16 c5 	zvdotphsuians r0,r1,r2
++ 85c:	10 01 16 c8 	zvdotphssi r0,r1,r2
++ 860:	10 01 16 c9 	zvdotphssis r0,r1,r2
++ 864:	10 01 16 ca 	zvdotphssiaa r0,r1,r2
++ 868:	10 01 16 cb 	zvdotphssiaas r0,r1,r2
++ 86c:	10 01 16 cc 	zvdotphssian r0,r1,r2
++ 870:	10 01 16 cd 	zvdotphssians r0,r1,r2
++ 874:	10 01 16 d0 	zvdotphssui r0,r1,r2
++ 878:	10 01 16 d1 	zvdotphssuis r0,r1,r2
++ 87c:	10 01 16 d2 	zvdotphssuiaa r0,r1,r2
++ 880:	10 01 16 d3 	zvdotphssuiaas r0,r1,r2
++ 884:	10 01 16 d4 	zvdotphssuian r0,r1,r2
++ 888:	10 01 16 d5 	zvdotphssuians r0,r1,r2
++ 88c:	10 01 16 d8 	zvdotphssfs r0,r1,r2
++ 890:	10 01 16 d9 	zvdotphssfrs r0,r1,r2
++ 894:	10 01 16 da 	zvdotphssfaas r0,r1,r2
++ 898:	10 01 16 db 	zvdotphssfraas r0,r1,r2
++ 89c:	10 01 16 dc 	zvdotphssfans r0,r1,r2
++ 8a0:	10 01 16 dd 	zvdotphssfrans r0,r1,r2
++ 8a4:	10 01 16 e1 	zmwluis r0,r1,r2
++ 8a8:	10 01 16 e2 	zmwluiaa r0,r1,r2
++ 8ac:	10 01 16 e3 	zmwluiaas r0,r1,r2
++ 8b0:	10 01 16 e4 	zmwluian r0,r1,r2
++ 8b4:	10 01 16 e5 	zmwluians r0,r1,r2
++ 8b8:	10 01 16 e9 	zmwlsis r0,r1,r2
++ 8bc:	10 01 16 eb 	zmwlsiaas r0,r1,r2
++ 8c0:	10 01 16 ed 	zmwlsians r0,r1,r2
++ 8c4:	10 01 16 f1 	zmwlsuis r0,r1,r2
++ 8c8:	10 01 16 f3 	zmwlsuiaas r0,r1,r2
++ 8cc:	10 01 16 f5 	zmwlsuians r0,r1,r2
++ 8d0:	10 01 16 f8 	zmwsf   r0,r1,r2
++ 8d4:	10 01 16 f9 	zmwsfr  r0,r1,r2
++ 8d8:	10 01 16 fa 	zmwsfaas r0,r1,r2
++ 8dc:	10 01 16 fb 	zmwsfraas r0,r1,r2
++ 8e0:	10 01 16 fc 	zmwsfans r0,r1,r2
++ 8e4:	10 01 16 fd 	zmwsfrans r0,r1,r2
++ 8e8:	10 01 13 00 	zlddx   r0,r1,r2
++ 8ec:	10 01 13 01 	zldd    r0,16\(r1\)
++ 8f0:	10 01 13 02 	zldwx   r0,r1,r2
++ 8f4:	10 01 13 03 	zldw    r0,16\(r1\)
++ 8f8:	10 01 13 04 	zldhx   r0,r1,r2
++ 8fc:	10 01 13 05 	zldh    r0,16\(r1\)
++ 900:	10 01 13 08 	zlwgsfdx r0,r1,r2
++ 904:	10 01 13 09 	zlwgsfd r0,8\(r1\)
++ 908:	10 01 13 0a 	zlwwosdx r0,r1,r2
++ 90c:	10 01 13 0b 	zlwwosd r0,8\(r1\)
++ 910:	10 01 13 0c 	zlwhsplatwdx r0,r1,r2
++ 914:	10 01 13 0d 	zlwhsplatwd r0,8\(r1\)
++ 918:	10 01 13 0e 	zlwhsplatdx r0,r1,r2
++ 91c:	10 01 13 0f 	zlwhsplatd r0,8\(r1\)
++ 920:	10 01 13 10 	zlwhgwsfdx r0,r1,r2
++ 924:	10 01 13 11 	zlwhgwsfd r0,8\(r1\)
++ 928:	10 01 13 12 	zlwhedx r0,r1,r2
++ 92c:	10 01 13 13 	zlwhed  r0,8\(r1\)
++ 930:	10 01 13 14 	zlwhosdx r0,r1,r2
++ 934:	10 01 13 15 	zlwhosd r0,8\(r1\)
++ 938:	10 01 13 16 	zlwhoudx r0,r1,r2
++ 93c:	10 01 13 17 	zlwhoud r0,8\(r1\)
++ 940:	10 01 13 18 	zlwhx   r0,r1,r2
++ 944:	10 01 13 19 	zlwh    r0,8\(r1\)
++ 948:	10 01 13 1a 	zlwwx   r0,r1,r2
++ 94c:	10 01 13 1b 	zlww    r0,8\(r1\)
++ 950:	10 01 13 1c 	zlhgwsfx r0,r1,r2
++ 954:	10 01 13 1d 	zlhgwsf r0,4\(r1\)
++ 958:	10 01 13 1e 	zlhhsplatx r0,r1,r2
++ 95c:	10 01 13 1f 	zlhhsplat r0,4\(r1\)
++ 960:	10 01 13 20 	zstddx  r0,r1,r2
++ 964:	10 01 13 21 	zstdd   r0,16\(r1\)
++ 968:	10 01 13 22 	zstdwx  r0,r1,r2
++ 96c:	10 01 13 23 	zstdw   r0,16\(r1\)
++ 970:	10 01 13 24 	zstdhx  r0,r1,r2
++ 974:	10 01 13 25 	zstdh   r0,16\(r1\)
++ 978:	10 01 13 28 	zstwhedx r0,r1,r2
++ 97c:	10 01 13 29 	zstwhed r0,8\(r1\)
++ 980:	10 01 13 2a 	zstwhodx r0,r1,r2
++ 984:	10 01 13 2b 	zstwhod r0,8\(r1\)
++ 988:	10 01 13 30 	zlhhex  r0,r1,r2
++ 98c:	10 01 13 31 	zlhhe   r0,4\(r1\)
++ 990:	10 01 13 32 	zlhhosx r0,r1,r2
++ 994:	10 01 13 33 	zlhhos  r0,4\(r1\)
++ 998:	10 01 13 34 	zlhhoux r0,r1,r2
++ 99c:	10 01 13 35 	zlhhou  r0,4\(r1\)
++ 9a0:	10 01 13 38 	zsthex  r0,r1,r2
++ 9a4:	10 01 13 39 	zsthe   r0,4\(r1\)
++ 9a8:	10 01 13 3a 	zsthox  r0,r1,r2
++ 9ac:	10 01 13 3b 	zstho   r0,4\(r1\)
++ 9b0:	10 01 13 3c 	zstwhx  r0,r1,r2
++ 9b4:	10 01 13 3d 	zstwh   r0,8\(r1\)
++ 9b8:	10 01 13 3e 	zstwwx  r0,r1,r2
++ 9bc:	10 01 13 3f 	zstww   r0,8\(r1\)
++ 9c0:	10 01 13 40 	zlddmx  r0,r1,r2
++ 9c4:	10 01 13 41 	zlddu   r0,16\(r1\)
++ 9c8:	10 01 13 42 	zldwmx  r0,r1,r2
++ 9cc:	10 01 13 43 	zldwu   r0,16\(r1\)
++ 9d0:	10 01 13 44 	zldhmx  r0,r1,r2
++ 9d4:	10 01 13 45 	zldhu   r0,16\(r1\)
++ 9d8:	10 01 13 48 	zlwgsfdmx r0,r1,r2
++ 9dc:	10 01 13 49 	zlwgsfdu r0,8\(r1\)
++ 9e0:	10 01 13 4a 	zlwwosdmx r0,r1,r2
++ 9e4:	10 01 13 4b 	zlwwosdu r0,8\(r1\)
++ 9e8:	10 01 13 4c 	zlwhsplatwdmx r0,r1,r2
++ 9ec:	10 01 13 4d 	zlwhsplatwdu r0,8\(r1\)
++ 9f0:	10 01 13 4e 	zlwhsplatdmx r0,r1,r2
++ 9f4:	10 01 13 4f 	zlwhsplatdu r0,8\(r1\)
++ 9f8:	10 01 13 50 	zlwhgwsfdmx r0,r1,r2
++ 9fc:	10 01 13 51 	zlwhgwsfdu r0,8\(r1\)
++ a00:	10 01 13 52 	zlwhedmx r0,r1,r2
++ a04:	10 01 13 53 	zlwhedu r0,8\(r1\)
++ a08:	10 01 13 54 	zlwhosdmx r0,r1,r2
++ a0c:	10 01 13 55 	zlwhosdu r0,8\(r1\)
++ a10:	10 01 13 56 	zlwhoudmx r0,r1,r2
++ a14:	10 01 13 57 	zlwhoudu r0,8\(r1\)
++ a18:	10 01 13 58 	zlwhmx  r0,r1,r2
++ a1c:	10 01 13 59 	zlwhu   r0,8\(r1\)
++ a20:	10 01 13 5a 	zlwwmx  r0,r1,r2
++ a24:	10 01 13 5b 	zlwwu   r0,8\(r1\)
++ a28:	10 01 13 5c 	zlhgwsfmx r0,r1,r2
++ a2c:	10 01 13 5d 	zlhgwsfu r0,4\(r1\)
++ a30:	10 01 13 5e 	zlhhsplatmx r0,r1,r2
++ a34:	10 01 13 5f 	zlhhsplatu r0,4\(r1\)
++ a38:	10 01 13 60 	zstddmx r0,r1,r2
++ a3c:	10 01 13 61 	zstddu  r0,16\(r1\)
++ a40:	10 01 13 62 	zstdwmx r0,r1,r2
++ a44:	10 01 13 63 	zstdwu  r0,16\(r1\)
++ a48:	10 01 13 64 	zstdhmx r0,r1,r2
++ a4c:	10 01 13 65 	zstdhu  r0,16\(r1\)
++ a50:	10 01 13 68 	zstwhedmx r0,r1,r2
++ a54:	10 01 13 69 	zstwhedu r0,8\(r1\)
++ a58:	10 01 13 6a 	zstwhodmx r0,r1,r2
++ a5c:	10 01 13 6b 	zstwhodu r0,8\(r1\)
++ a60:	10 01 13 70 	zlhhemx r0,r1,r2
++ a64:	10 01 13 71 	zlhheu  r0,4\(r1\)
++ a68:	10 01 13 72 	zlhhosmx r0,r1,r2
++ a6c:	10 01 13 73 	zlhhosu r0,4\(r1\)
++ a70:	10 01 13 74 	zlhhoumx r0,r1,r2
++ a74:	10 01 13 75 	zlhhouu r0,4\(r1\)
++ a78:	10 01 13 78 	zsthemx r0,r1,r2
++ a7c:	10 01 13 79 	zstheu  r0,4\(r1\)
++ a80:	10 01 13 7a 	zsthomx r0,r1,r2
++ a84:	10 01 13 7b 	zsthou  r0,4\(r1\)
++ a88:	10 01 13 7c 	zstwhmx r0,r1,r2
++ a8c:	10 01 13 7d 	zstwhu  r0,8\(r1\)
++ a90:	10 01 13 7e 	zstwwmx r0,r1,r2
++ a94:	10 01 13 7f 	zstwwu  r0,8\(r1\)
+\ No newline at end of file
+diff --git a/gas/testsuite/gas/ppc/lsp.s b/gas/testsuite/gas/ppc/lsp.s
+new file mode 100644
+index 0000000..cfde35c
+--- /dev/null
++++ b/gas/testsuite/gas/ppc/lsp.s
+@@ -0,0 +1,695 @@
++# PA LSP instructions
++# CMPE200GCC-62
++	.section ".text"
++
++	.equ	rA,1
++	.equ	rB,2
++	.equ	rD,0
++	.equ	rS,0
++	.equ 	UIMM, 15 ;#UIMM values >15 are illegal
++	.equ 	UIMM_2, 4
++	.equ 	UIMM_4, 8
++	.equ 	UIMM_8, 16
++	.equ	SIMM, -16
++	.equ	crD, 0
++	.equ	offset, 1
++
++	zvaddih            rD, rA, UIMM
++	zvsubifh           rD, rA, UIMM
++	zvaddh             rD, rA, rB
++	zvsubfh            rD, rA, rB
++	zvaddsubfh         rD, rA, rB
++	zvsubfaddh         rD, rA, rB
++	zvaddhx            rD, rA, rB
++	zvsubfhx           rD, rA, rB
++	zvaddsubfhx        rD, rA, rB
++	zvsubfaddhx        rD, rA, rB
++	zaddwus            rD, rA, rB
++	zsubfwus           rD, rA, rB
++	zaddwss            rD, rA, rB
++	zsubfwss           rD, rA, rB
++	zvaddhus           rD, rA, rB
++	zvsubfhus          rD, rA, rB
++	zvaddhss           rD, rA, rB
++	zvsubfhss          rD, rA, rB
++	zvaddsubfhss       rD, rA, rB
++	zvsubfaddhss       rD, rA, rB
++	zvaddhxss          rD, rA, rB
++	zvsubfhxss         rD, rA, rB
++	zvaddsubfhxss      rD, rA, rB
++	zvsubfaddhxss      rD, rA, rB
++	zaddheuw           rD, rA, rB
++	zsubfheuw          rD, rA, rB
++	zaddhesw           rD, rA, rB
++	zsubfhesw          rD, rA, rB
++	zaddhouw           rD, rA, rB
++	zsubfhouw          rD, rA, rB
++	zaddhosw           rD, rA, rB
++	zsubfhosw          rD, rA, rB
++	zvmergehih         rD, rA, rB
++	zvmergeloh         rD, rA, rB
++	zvmergehiloh       rD, rA, rB
++	zvmergelohih       rD, rA, rB
++	zvcmpgthu          crD, rA, rB
++	zvcmpgths          crD, rA, rB
++	zvcmplthu          crD, rA, rB
++	zvcmplths          crD, rA, rB
++	zvcmpeqh           crD, rA, rB
++	zpkswgshfrs        rD, rA, rB
++	zpkswgswfrs        rD, rA, rB
++	zvpkshgwshfrs      rD, rA, rB
++	zvpkswshfrs        rD, rA, rB
++	zvpkswuhs          rD, rA, rB
++	zvpkswshs          rD, rA, rB
++	zvpkuwuhs          rD, rA, rB
++	zvsplatih          rD, SIMM
++	zvsplatfih         rD, SIMM
++	zcntlsw            rD, rA
++	zvcntlzh           rD, rA
++	zvcntlsh           rD, rA
++	znegws             rD, rA
++	zvnegh             rD, rA
++	zvneghs            rD, rA
++	zvnegho            rD, rA
++	zvneghos           rD, rA
++	zrndwh             rD, rA
++	zrndwhss           rD, rA
++	zvabsh             rD, rA
++	zvabshs            rD, rA
++	zabsw              rD, rA
++	zabsws             rD, rA
++	zsatswuw           rD, rA
++	zsatuwsw           rD, rA
++	zsatswuh           rD, rA
++	zsatswsh           rD, rA
++	zvsatshuh          rD, rA
++	zvsatuhsh          rD, rA
++	zsatuwuh           rD, rA
++	zsatuwsh           rD, rA
++	zsatsduw           rD, rA, rB
++	zsatsdsw           rD, rA, rB
++	zsatuduw           rD, rA, rB
++	zvselh             rD, rA, rB
++	zxtrw              rD, rA, rB, offset
++	zbrminc            rD, rA, rB
++	zcircinc           rD, rA, rB
++	zdivwsf            rD, rA, rB
++	zvsrhu             rD, rA, rB
++	zvsrhs             rD, rA, rB
++	zvsrhiu            rD, rA, UIMM
++	zvsrhis            rD, rA, UIMM
++	zvslh              rD, rA, rB
++	zvrlh              rD, rA, rB
++	zvslhi             rD, rA, UIMM
++	zvrlhi             rD, rA, UIMM
++	zvslhus            rD, rA, rB
++	zvslhss            rD, rA, rB
++	zvslhius           rD, rA, UIMM
++	zvslhiss           rD, rA, UIMM
++	zslwus             rD, rA, rB
++	zslwss             rD, rA, rB
++	zslwius            rD, rA, UIMM
++	zslwiss            rD, rA, UIMM
++	zaddwgui           rD, rA, rB
++	zsubfwgui          rD, rA, rB
++	zaddd              rD, rA, rB
++	zsubfd             rD, rA, rB
++	zvaddsubfw         rD, rA, rB
++	zvsubfaddw         rD, rA, rB
++	zvaddw             rD, rA, rB
++	zvsubfw            rD, rA, rB
++	zaddwgsi           rD, rA, rB
++	zsubfwgsi          rD, rA, rB
++	zadddss            rD, rA, rB
++	zsubfdss           rD, rA, rB
++	zvaddsubfwss       rD, rA, rB
++	zvsubfaddwss       rD, rA, rB
++	zvaddwss           rD, rA, rB
++	zvsubfwss          rD, rA, rB
++	zaddwgsf           rD, rA, rB
++	zsubfwgsf          rD, rA, rB
++	zadddus            rD, rA, rB
++	zsubfdus           rD, rA, rB
++	zvaddwus           rD, rA, rB
++	zvsubfwus          rD, rA, rB
++	zvunpkhgwsf        rD, rA
++	zvunpkhsf          rD, rA
++	zvunpkhui          rD, rA
++	zvunpkhsi          rD, rA
++	zunpkwgsf          rD, rA
++	zvdotphgwasmf      rD, rA, rB
++	zvdotphgwasmfr     rD, rA, rB
++	zvdotphgwasmfaa    rD, rA, rB
++	zvdotphgwasmfraa   rD, rA, rB
++	zvdotphgwasmfan    rD, rA, rB
++	zvdotphgwasmfran   rD, rA, rB
++	zvmhulgwsmf        rD, rA, rB
++	zvmhulgwsmfr       rD, rA, rB
++	zvmhulgwsmfaa      rD, rA, rB
++	zvmhulgwsmfraa     rD, rA, rB
++	zvmhulgwsmfan      rD, rA, rB
++	zvmhulgwsmfran     rD, rA, rB
++	zvmhulgwsmfanp     rD, rA, rB
++	zvmhulgwsmfranp    rD, rA, rB
++	zmhegwsmf          rD, rA, rB
++	zmhegwsmfr         rD, rA, rB
++	zmhegwsmfaa        rD, rA, rB
++	zmhegwsmfraa       rD, rA, rB
++	zmhegwsmfan        rD, rA, rB
++	zmhegwsmfran       rD, rA, rB
++	zvdotphxgwasmf     rD, rA, rB
++	zvdotphxgwasmfr    rD, rA, rB
++	zvdotphxgwasmfaa   rD, rA, rB
++	zvdotphxgwasmfraa  rD, rA, rB
++	zvdotphxgwasmfan   rD, rA, rB
++	zvdotphxgwasmfran  rD, rA, rB
++	zvmhllgwsmf        rD, rA, rB
++	zvmhllgwsmfr       rD, rA, rB
++	zvmhllgwsmfaa      rD, rA, rB
++	zvmhllgwsmfraa     rD, rA, rB
++	zvmhllgwsmfan      rD, rA, rB
++	zvmhllgwsmfran     rD, rA, rB
++	zvmhllgwsmfanp     rD, rA, rB
++	zvmhllgwsmfranp    rD, rA, rB
++	zmheogwsmf         rD, rA, rB
++	zmheogwsmfr        rD, rA, rB
++	zmheogwsmfaa       rD, rA, rB
++	zmheogwsmfraa      rD, rA, rB
++	zmheogwsmfan       rD, rA, rB
++	zmheogwsmfran      rD, rA, rB
++	zvdotphgwssmf      rD, rA, rB
++	zvdotphgwssmfr     rD, rA, rB
++	zvdotphgwssmfaa    rD, rA, rB
++	zvdotphgwssmfraa   rD, rA, rB
++	zvdotphgwssmfan    rD, rA, rB
++	zvdotphgwssmfran   rD, rA, rB
++	zvmhuugwsmf        rD, rA, rB
++	zvmhuugwsmfr       rD, rA, rB
++	zvmhuugwsmfaa      rD, rA, rB
++	zvmhuugwsmfraa     rD, rA, rB
++	zvmhuugwsmfan      rD, rA, rB
++	zvmhuugwsmfran     rD, rA, rB
++	zvmhuugwsmfanp     rD, rA, rB
++	zvmhuugwsmfranp    rD, rA, rB
++	zmhogwsmf          rD, rA, rB
++	zmhogwsmfr         rD, rA, rB
++	zmhogwsmfaa        rD, rA, rB
++	zmhogwsmfraa       rD, rA, rB
++	zmhogwsmfan        rD, rA, rB
++	zmhogwsmfran       rD, rA, rB
++	zvmhxlgwsmf        rD, rA, rB
++	zvmhxlgwsmfr       rD, rA, rB
++	zvmhxlgwsmfaa      rD, rA, rB
++	zvmhxlgwsmfraa     rD, rA, rB
++	zvmhxlgwsmfan      rD, rA, rB
++	zvmhxlgwsmfran     rD, rA, rB
++	zvmhxlgwsmfanp     rD, rA, rB
++	zvmhxlgwsmfranp    rD, rA, rB
++	zmhegui            rD, rA, rB
++	zvdotphgaui        rD, rA, rB
++	zmheguiaa          rD, rA, rB
++	zvdotphgauiaa      rD, rA, rB
++	zmheguian          rD, rA, rB
++	zvdotphgauian      rD, rA, rB
++	zmhegsi            rD, rA, rB
++	zvdotphgasi        rD, rA, rB
++	zmhegsiaa          rD, rA, rB
++	zvdotphgasiaa      rD, rA, rB
++	zmhegsian          rD, rA, rB
++	zvdotphgasian      rD, rA, rB
++	zmhegsui           rD, rA, rB
++	zvdotphgasui       rD, rA, rB
++	zmhegsuiaa         rD, rA, rB
++	zvdotphgasuiaa     rD, rA, rB
++	zmhegsuian         rD, rA, rB
++	zvdotphgasuian     rD, rA, rB
++	zmhegsmf           rD, rA, rB
++	zvdotphgasmf       rD, rA, rB
++	zmhegsmfaa         rD, rA, rB
++	zvdotphgasmfaa     rD, rA, rB
++	zmhegsmfan         rD, rA, rB
++	zvdotphgasmfan     rD, rA, rB
++	zmheogui           rD, rA, rB
++	zvdotphxgaui       rD, rA, rB
++	zmheoguiaa         rD, rA, rB
++	zvdotphxgauiaa     rD, rA, rB
++	zmheoguian         rD, rA, rB
++	zvdotphxgauian     rD, rA, rB
++	zmheogsi           rD, rA, rB
++	zvdotphxgasi       rD, rA, rB
++	zmheogsiaa         rD, rA, rB
++	zvdotphxgasiaa     rD, rA, rB
++	zmheogsian         rD, rA, rB
++	zvdotphxgasian     rD, rA, rB
++	zmheogsui          rD, rA, rB
++	zvdotphxgasui      rD, rA, rB
++	zmheogsuiaa        rD, rA, rB
++	zvdotphxgasuiaa    rD, rA, rB
++	zmheogsuian        rD, rA, rB
++	zvdotphxgasuian    rD, rA, rB
++	zmheogsmf          rD, rA, rB
++	zvdotphxgasmf      rD, rA, rB
++	zmheogsmfaa        rD, rA, rB
++	zvdotphxgasmfaa    rD, rA, rB
++	zmheogsmfan        rD, rA, rB
++	zvdotphxgasmfan    rD, rA, rB
++	zmhogui            rD, rA, rB
++	zvdotphgsui        rD, rA, rB
++	zmhoguiaa          rD, rA, rB
++	zvdotphgsuiaa      rD, rA, rB
++	zmhoguian          rD, rA, rB
++	zvdotphgsuian      rD, rA, rB
++	zmhogsi            rD, rA, rB
++	zvdotphgssi        rD, rA, rB
++	zmhogsiaa          rD, rA, rB
++	zvdotphgssiaa      rD, rA, rB
++	zmhogsian          rD, rA, rB
++	zvdotphgssian      rD, rA, rB
++	zmhogsui           rD, rA, rB
++	zvdotphgssui       rD, rA, rB
++	zmhogsuiaa         rD, rA, rB
++	zvdotphgssuiaa     rD, rA, rB
++	zmhogsuian         rD, rA, rB
++	zvdotphgssuian     rD, rA, rB
++	zmhogsmf           rD, rA, rB
++	zvdotphgssmf       rD, rA, rB
++	zmhogsmfaa         rD, rA, rB
++	zvdotphgssmfaa     rD, rA, rB
++	zmhogsmfan         rD, rA, rB
++	zvdotphgssmfan     rD, rA, rB
++	zmwgui             rD, rA, rB
++	zmwguiaa           rD, rA, rB
++	zmwguiaas          rD, rA, rB
++	zmwguian           rD, rA, rB
++	zmwguians          rD, rA, rB
++	zmwgsi             rD, rA, rB
++	zmwgsiaa           rD, rA, rB
++	zmwgsiaas          rD, rA, rB
++	zmwgsian           rD, rA, rB
++	zmwgsians          rD, rA, rB
++	zmwgsui            rD, rA, rB
++	zmwgsuiaa          rD, rA, rB
++	zmwgsuiaas         rD, rA, rB
++	zmwgsuian          rD, rA, rB
++	zmwgsuians         rD, rA, rB
++	zmwgsmf            rD, rA, rB
++	zmwgsmfr           rD, rA, rB
++	zmwgsmfaa          rD, rA, rB
++	zmwgsmfraa         rD, rA, rB
++	zmwgsmfan          rD, rA, rB
++	zmwgsmfran         rD, rA, rB
++	zvmhului           rD, rA, rB
++	zvmhuluiaa         rD, rA, rB
++	zvmhuluiaas        rD, rA, rB
++	zvmhuluian         rD, rA, rB
++	zvmhuluians        rD, rA, rB
++	zvmhuluianp        rD, rA, rB
++	zvmhuluianps       rD, rA, rB
++	zvmhulsi           rD, rA, rB
++	zvmhulsiaa         rD, rA, rB
++	zvmhulsiaas        rD, rA, rB
++	zvmhulsian         rD, rA, rB
++	zvmhulsians        rD, rA, rB
++	zvmhulsianp        rD, rA, rB
++	zvmhulsianps       rD, rA, rB
++	zvmhulsui          rD, rA, rB
++	zvmhulsuiaa        rD, rA, rB
++	zvmhulsuiaas       rD, rA, rB
++	zvmhulsuian        rD, rA, rB
++	zvmhulsuians       rD, rA, rB
++	zvmhulsuianp       rD, rA, rB
++	zvmhulsuianps      rD, rA, rB
++	zvmhulsf           rD, rA, rB
++	zvmhulsfr          rD, rA, rB
++	zvmhulsfaas        rD, rA, rB
++	zvmhulsfraas       rD, rA, rB
++	zvmhulsfans        rD, rA, rB
++	zvmhulsfrans       rD, rA, rB
++	zvmhulsfanps       rD, rA, rB
++	zvmhulsfranps      rD, rA, rB
++	zvmhllui           rD, rA, rB
++	zvmhlluiaa         rD, rA, rB
++	zvmhlluiaas        rD, rA, rB
++	zvmhlluian         rD, rA, rB
++	zvmhlluians        rD, rA, rB
++	zvmhlluianp        rD, rA, rB
++	zvmhlluianps       rD, rA, rB
++	zvmhllsi           rD, rA, rB
++	zvmhllsiaa         rD, rA, rB
++	zvmhllsiaas        rD, rA, rB
++	zvmhllsian         rD, rA, rB
++	zvmhllsians        rD, rA, rB
++	zvmhllsianp        rD, rA, rB
++	zvmhllsianps       rD, rA, rB
++	zvmhllsui          rD, rA, rB
++	zvmhllsuiaa        rD, rA, rB
++	zvmhllsuiaas       rD, rA, rB
++	zvmhllsuian        rD, rA, rB
++	zvmhllsuians       rD, rA, rB
++	zvmhllsuianp       rD, rA, rB
++	zvmhllsuianps      rD, rA, rB
++	zvmhllsf           rD, rA, rB
++	zvmhllsfr          rD, rA, rB
++	zvmhllsfaas        rD, rA, rB
++	zvmhllsfraas       rD, rA, rB
++	zvmhllsfans        rD, rA, rB
++	zvmhllsfrans       rD, rA, rB
++	zvmhllsfanps       rD, rA, rB
++	zvmhllsfranps      rD, rA, rB
++	zvmhuuui           rD, rA, rB
++	zvmhuuuiaa         rD, rA, rB
++	zvmhuuuiaas        rD, rA, rB
++	zvmhuuuian         rD, rA, rB
++	zvmhuuuians        rD, rA, rB
++	zvmhuuuianp        rD, rA, rB
++	zvmhuuuianps       rD, rA, rB
++	zvmhuusi           rD, rA, rB
++	zvmhuusiaa         rD, rA, rB
++	zvmhuusiaas        rD, rA, rB
++	zvmhuusian         rD, rA, rB
++	zvmhuusians        rD, rA, rB
++	zvmhuusianp        rD, rA, rB
++	zvmhuusianps       rD, rA, rB
++	zvmhuusui          rD, rA, rB
++	zvmhuusuiaa        rD, rA, rB
++	zvmhuusuiaas       rD, rA, rB
++	zvmhuusuian        rD, rA, rB
++	zvmhuusuians       rD, rA, rB
++	zvmhuusuianp       rD, rA, rB
++	zvmhuusuianps      rD, rA, rB
++	zvmhuusf           rD, rA, rB
++	zvmhuusfr          rD, rA, rB
++	zvmhuusfaas        rD, rA, rB
++	zvmhuusfraas       rD, rA, rB
++	zvmhuusfans        rD, rA, rB
++	zvmhuusfrans       rD, rA, rB
++	zvmhuusfanps       rD, rA, rB
++	zvmhuusfranps      rD, rA, rB
++	zvmhxlui           rD, rA, rB
++	zvmhxluiaa         rD, rA, rB
++	zvmhxluiaas        rD, rA, rB
++	zvmhxluian         rD, rA, rB
++	zvmhxluians        rD, rA, rB
++	zvmhxluianp        rD, rA, rB
++	zvmhxluianps       rD, rA, rB
++	zvmhxlsi           rD, rA, rB
++	zvmhxlsiaa         rD, rA, rB
++	zvmhxlsiaas        rD, rA, rB
++	zvmhxlsian         rD, rA, rB
++	zvmhxlsians        rD, rA, rB
++	zvmhxlsianp        rD, rA, rB
++	zvmhxlsianps       rD, rA, rB
++	zvmhxlsui          rD, rA, rB
++	zvmhxlsuiaa        rD, rA, rB
++	zvmhxlsuiaas       rD, rA, rB
++	zvmhxlsuian        rD, rA, rB
++	zvmhxlsuians       rD, rA, rB
++	zvmhxlsuianp       rD, rA, rB
++	zvmhxlsuianps      rD, rA, rB
++	zvmhxlsf           rD, rA, rB
++	zvmhxlsfr          rD, rA, rB
++	zvmhxlsfaas        rD, rA, rB
++	zvmhxlsfraas       rD, rA, rB
++	zvmhxlsfans        rD, rA, rB
++	zvmhxlsfrans       rD, rA, rB
++	zvmhxlsfanps       rD, rA, rB
++	zvmhxlsfranps      rD, rA, rB
++	zmheui             rD, rA, rB
++	zmheuiaa           rD, rA, rB
++	zmheuiaas          rD, rA, rB
++	zmheuian           rD, rA, rB
++	zmheuians          rD, rA, rB
++	zmhesi             rD, rA, rB
++	zmhesiaa           rD, rA, rB
++	zmhesiaas          rD, rA, rB
++	zmhesian           rD, rA, rB
++	zmhesians          rD, rA, rB
++	zmhesui            rD, rA, rB
++	zmhesuiaa          rD, rA, rB
++	zmhesuiaas         rD, rA, rB
++	zmhesuian          rD, rA, rB
++	zmhesuians         rD, rA, rB
++	zmhesf             rD, rA, rB
++	zmhesfr            rD, rA, rB
++	zmhesfaas          rD, rA, rB
++	zmhesfraas         rD, rA, rB
++	zmhesfans          rD, rA, rB
++	zmhesfrans         rD, rA, rB
++	zmheoui            rD, rA, rB
++	zmheouiaa          rD, rA, rB
++	zmheouiaas         rD, rA, rB
++	zmheouian          rD, rA, rB
++	zmheouians         rD, rA, rB
++	zmheosi            rD, rA, rB
++	zmheosiaa          rD, rA, rB
++	zmheosiaas         rD, rA, rB
++	zmheosian          rD, rA, rB
++	zmheosians         rD, rA, rB
++	zmheosui           rD, rA, rB
++	zmheosuiaa         rD, rA, rB
++	zmheosuiaas        rD, rA, rB
++	zmheosuian         rD, rA, rB
++	zmheosuians        rD, rA, rB
++	zmheosf            rD, rA, rB
++	zmheosfr           rD, rA, rB
++	zmheosfaas         rD, rA, rB
++	zmheosfraas        rD, rA, rB
++	zmheosfans         rD, rA, rB
++	zmheosfrans        rD, rA, rB
++	zmhoui             rD, rA, rB
++	zmhouiaa           rD, rA, rB
++	zmhouiaas          rD, rA, rB
++	zmhouian           rD, rA, rB
++	zmhouians          rD, rA, rB
++	zmhosi             rD, rA, rB
++	zmhosiaa           rD, rA, rB
++	zmhosiaas          rD, rA, rB
++	zmhosian           rD, rA, rB
++	zmhosians          rD, rA, rB
++	zmhosui            rD, rA, rB
++	zmhosuiaa          rD, rA, rB
++	zmhosuiaas         rD, rA, rB
++	zmhosuian          rD, rA, rB
++	zmhosuians         rD, rA, rB
++	zmhosf             rD, rA, rB
++	zmhosfr            rD, rA, rB
++	zmhosfaas          rD, rA, rB
++	zmhosfraas         rD, rA, rB
++	zmhosfans          rD, rA, rB
++	zmhosfrans         rD, rA, rB
++	zvmhuih            rD, rA, rB
++	zvmhuihs           rD, rA, rB
++	zvmhuiaah          rD, rA, rB
++	zvmhuiaahs         rD, rA, rB
++	zvmhuianh          rD, rA, rB
++	zvmhuianhs         rD, rA, rB
++	zvmhsihs           rD, rA, rB
++	zvmhsiaahs         rD, rA, rB
++	zvmhsianhs         rD, rA, rB
++	zvmhsuihs          rD, rA, rB
++	zvmhsuiaahs        rD, rA, rB
++	zvmhsuianhs        rD, rA, rB
++	zvmhsfh            rD, rA, rB
++	zvmhsfrh           rD, rA, rB
++	zvmhsfaahs         rD, rA, rB
++	zvmhsfraahs        rD, rA, rB
++	zvmhsfanhs         rD, rA, rB
++	zvmhsfranhs        rD, rA, rB
++	zvdotphaui         rD, rA, rB
++	zvdotphauis        rD, rA, rB
++	zvdotphauiaa       rD, rA, rB
++	zvdotphauiaas      rD, rA, rB
++	zvdotphauian       rD, rA, rB
++	zvdotphauians      rD, rA, rB
++	zvdotphasi         rD, rA, rB
++	zvdotphasis        rD, rA, rB
++	zvdotphasiaa       rD, rA, rB
++	zvdotphasiaas      rD, rA, rB
++	zvdotphasian       rD, rA, rB
++	zvdotphasians      rD, rA, rB
++	zvdotphasui        rD, rA, rB
++	zvdotphasuis       rD, rA, rB
++	zvdotphasuiaa      rD, rA, rB
++	zvdotphasuiaas     rD, rA, rB
++	zvdotphasuian      rD, rA, rB
++	zvdotphasuians     rD, rA, rB
++	zvdotphasfs        rD, rA, rB
++	zvdotphasfrs       rD, rA, rB
++	zvdotphasfaas      rD, rA, rB
++	zvdotphasfraas     rD, rA, rB
++	zvdotphasfans      rD, rA, rB
++	zvdotphasfrans     rD, rA, rB
++	zvdotphxaui        rD, rA, rB
++	zvdotphxauis       rD, rA, rB
++	zvdotphxauiaa      rD, rA, rB
++	zvdotphxauiaas     rD, rA, rB
++	zvdotphxauian      rD, rA, rB
++	zvdotphxauians     rD, rA, rB
++	zvdotphxasi        rD, rA, rB
++	zvdotphxasis       rD, rA, rB
++	zvdotphxasiaa      rD, rA, rB
++	zvdotphxasiaas     rD, rA, rB
++	zvdotphxasian      rD, rA, rB
++	zvdotphxasians     rD, rA, rB
++	zvdotphxasui       rD, rA, rB
++	zvdotphxasuis      rD, rA, rB
++	zvdotphxasuiaa     rD, rA, rB
++	zvdotphxasuiaas    rD, rA, rB
++	zvdotphxasuian     rD, rA, rB
++	zvdotphxasuians    rD, rA, rB
++	zvdotphxasfs       rD, rA, rB
++	zvdotphxasfrs      rD, rA, rB
++	zvdotphxasfaas     rD, rA, rB
++	zvdotphxasfraas    rD, rA, rB
++	zvdotphxasfans     rD, rA, rB
++	zvdotphxasfrans    rD, rA, rB
++	zvdotphsui         rD, rA, rB
++	zvdotphsuis        rD, rA, rB
++	zvdotphsuiaa       rD, rA, rB
++	zvdotphsuiaas      rD, rA, rB
++	zvdotphsuian       rD, rA, rB
++	zvdotphsuians      rD, rA, rB
++	zvdotphssi         rD, rA, rB
++	zvdotphssis        rD, rA, rB
++	zvdotphssiaa       rD, rA, rB
++	zvdotphssiaas      rD, rA, rB
++	zvdotphssian       rD, rA, rB
++	zvdotphssians      rD, rA, rB
++	zvdotphssui        rD, rA, rB
++	zvdotphssuis       rD, rA, rB
++	zvdotphssuiaa      rD, rA, rB
++	zvdotphssuiaas     rD, rA, rB
++	zvdotphssuian      rD, rA, rB
++	zvdotphssuians     rD, rA, rB
++	zvdotphssfs        rD, rA, rB
++	zvdotphssfrs       rD, rA, rB
++	zvdotphssfaas      rD, rA, rB
++	zvdotphssfraas     rD, rA, rB
++	zvdotphssfans      rD, rA, rB
++	zvdotphssfrans     rD, rA, rB
++	zmwluis            rD, rA, rB
++	zmwluiaa           rD, rA, rB
++	zmwluiaas          rD, rA, rB
++	zmwluian           rD, rA, rB
++	zmwluians          rD, rA, rB
++	zmwlsis            rD, rA, rB
++	zmwlsiaas          rD, rA, rB
++	zmwlsians          rD, rA, rB
++	zmwlsuis           rD, rA, rB
++	zmwlsuiaas         rD, rA, rB
++	zmwlsuians         rD, rA, rB
++	zmwsf              rD, rA, rB
++	zmwsfr             rD, rA, rB
++	zmwsfaas           rD, rA, rB
++	zmwsfraas          rD, rA, rB
++	zmwsfans           rD, rA, rB
++	zmwsfrans          rD, rA, rB
++	zlddx              rD, rA, rB
++	zldd               rD, UIMM_8(rA)
++	zldwx              rD, rA, rB
++	zldw               rD, UIMM_8(rA)
++	zldhx              rD, rA, rB
++	zldh               rD, UIMM_8(rA)
++	zlwgsfdx           rD, rA, rB
++	zlwgsfd            rD, UIMM_4(rA)
++	zlwwosdx           rD, rA, rB
++	zlwwosd            rD, UIMM_4(rA)
++	zlwhsplatwdx       rD, rA, rB
++	zlwhsplatwd        rD, UIMM_4(rA)
++	zlwhsplatdx        rD, rA, rB
++	zlwhsplatd         rD, UIMM_4(rA)
++	zlwhgwsfdx         rD, rA, rB
++	zlwhgwsfd          rD, UIMM_4(rA)
++	zlwhedx            rD, rA, rB
++	zlwhed             rD, UIMM_4(rA)
++	zlwhosdx           rD, rA, rB
++	zlwhosd            rD, UIMM_4(rA)
++	zlwhoudx           rD, rA, rB
++	zlwhoud            rD, UIMM_4(rA)
++	zlwhx              rD, rA, rB
++	zlwh               rD, UIMM_4(rA)
++	zlwwx              rD, rA, rB
++	zlww               rD, UIMM_4(rA)
++	zlhgwsfx           rD, rA, rB
++	zlhgwsf            rD, UIMM_2(rA)
++	zlhhsplatx         rD, rA, rB
++	zlhhsplat          rD, UIMM_2(rA)
++	zstddx             rS, rA, rB
++	zstdd              rS, UIMM_8(rA)
++	zstdwx             rS, rA, rB
++	zstdw              rS, UIMM_8(rA)
++	zstdhx             rS, rA, rB
++	zstdh              rS, UIMM_8(rA)
++	zstwhedx           rS, rA, rB
++	zstwhed            rS, UIMM_4(rA)
++	zstwhodx           rS, rA, rB
++	zstwhod            rS, UIMM_4(rA)
++	zlhhex             rS, rA, rB
++	zlhhe              rD, UIMM_2(rA)
++	zlhhosx            rS, rA, rB
++	zlhhos             rD, UIMM_2(rA)
++	zlhhoux            rS, rA, rB
++	zlhhou             rD, UIMM_2(rA)
++	zsthex             rS, rA, rB
++	zsthe              rS, UIMM_2(rA)
++	zsthox             rS, rA, rB
++	zstho              rS, UIMM_2(rA)
++	zstwhx             rS, rA, rB
++	zstwh              rS, UIMM_4(rA)
++	zstwwx             rS, rA, rB
++	zstww              rS, UIMM_4(rA)
++	zlddmx             rD, rA, rB
++	zlddu              rD, UIMM_8(rA)
++	zldwmx             rD, rA, rB
++	zldwu              rD, UIMM_8(rA)
++	zldhmx             rD, rA, rB
++	zldhu              rD, UIMM_8(rA)
++	zlwgsfdmx          rD, rA, rB
++	zlwgsfdu           rD, UIMM_4(rA)
++	zlwwosdmx          rD, rA, rB
++	zlwwosdu           rD, UIMM_4(rA)
++	zlwhsplatwdmx      rD, rA, rB
++	zlwhsplatwdu       rD, UIMM_4(rA)
++	zlwhsplatdmx       rD, rA, rB
++	zlwhsplatdu        rD, UIMM_4(rA)
++	zlwhgwsfdmx        rD, rA, rB
++	zlwhgwsfdu         rD, UIMM_4(rA)
++	zlwhedmx           rD, rA, rB
++	zlwhedu            rD, UIMM_4(rA)
++	zlwhosdmx          rD, rA, rB
++	zlwhosdu           rD, UIMM_4(rA)
++	zlwhoudmx          rD, rA, rB
++	zlwhoudu           rD, UIMM_4(rA)
++	zlwhmx             rD, rA, rB
++	zlwhu              rD, UIMM_4(rA)
++	zlwwmx             rD, rA, rB
++	zlwwu              rD, UIMM_4(rA)
++	zlhgwsfmx          rD, rA, rB
++	zlhgwsfu           rD, UIMM_2(rA)
++	zlhhsplatmx        rD, rA, rB
++	zlhhsplatu         rD, UIMM_2(rA)
++	zstddmx            rS, rA, rB
++	zstddu             rS, UIMM_8(rA)
++	zstdwmx            rS, rA, rB
++	zstdwu             rS, UIMM_8(rA)
++	zstdhmx            rS, rA, rB
++	zstdhu             rS, UIMM_8(rA)
++	zstwhedmx          rS, rA, rB
++	zstwhedu           rS, UIMM_4(rA)
++	zstwhodmx          rD, rA, rB
++	zstwhodu           rS, UIMM_4(rA)
++	zlhhemx            rD, rA, rB
++	zlhheu             rD, UIMM_2(rA)
++	zlhhosmx           rD, rA, rB
++	zlhhosu            rD, UIMM_2(rA)
++	zlhhoumx           rD, rA, rB
++	zlhhouu            rD, UIMM_2(rA)
++	zsthemx            rS, rA, rB
++	zstheu             rS, UIMM_2(rA)
++	zsthomx            rS, rA, rB
++	zsthou             rS, UIMM_2(rA)
++	zstwhmx            rS, rA, rB
++	zstwhu             rS, UIMM_4(rA)
++	zstwwmx            rS, rA, rB
++	zstwwu             rS, UIMM_4(rA)
++	
+diff --git a/gas/testsuite/gas/ppc/ppc.exp b/gas/testsuite/gas/ppc/ppc.exp
+index 86db455..4c43377 100644
+--- a/gas/testsuite/gas/ppc/ppc.exp
++++ b/gas/testsuite/gas/ppc/ppc.exp
+@@ -59,6 +59,21 @@ if { [istarget powerpc*-*-*] } then {
+ 	    run_dump_test "vle-simple-4"
+ 	    run_dump_test "vle-simple-5"
+ 	    run_dump_test "vle-simple-6"
++	    run_dump_test "lsp"
++	    run_dump_test "lsp-checks"
++	    run_dump_test "cmpe200gcc-0010"
++	    run_dump_test "cmpe200gcc-0034"
++	    run_dump_test "cmpe200gcc-0035"
++	    run_dump_test "efs"
++	    run_dump_test "efs2"
++	    run_dump_test "spe2"
++	    run_dump_test "spe2-checks"
++	    run_dump_test "spe"
++	    run_dump_test "e200z4_decorated"
++	    run_dump_test "e200z4_decorated_booke"
++
++	    setup_xfail "*-*-*"
++	    run_dump_test "spe_ambiguous"
+ 	}
+     }
+ 
+diff --git a/gas/testsuite/gas/ppc/spe.d b/gas/testsuite/gas/ppc/spe.d
+new file mode 100644
+index 0000000..1d2370c
+--- /dev/null
++++ b/gas/testsuite/gas/ppc/spe.d
+@@ -0,0 +1,267 @@
++#as: -mvle
++#objdump: -d -Mspe
++#name: Validate SPE instructions
++
++.*: +file format elf.*-powerpc.*
++
++
++Disassembly of section .text:
++
++00000000 <.text>:
++   0:	10 01 12 00 	evaddw  r0,r1,r2
++   4:	10 1f 12 02 	evaddiw r0,r2,31
++   8:	10 01 12 04 	evsubfw r0,r1,r2
++   c:	10 01 12 04 	evsubfw r0,r1,r2
++  10:	10 1f 12 06 	evsubifw r0,31,r2
++  14:	10 1f 12 06 	evsubifw r0,31,r2
++  18:	10 01 02 08 	evabs   r0,r1
++  1c:	10 01 02 09 	evneg   r0,r1
++  20:	10 01 02 0a 	evextsb r0,r1
++  24:	10 01 02 0b 	evextsh r0,r1
++  28:	10 01 02 0c 	evrndw  r0,r1
++  2c:	10 01 02 0d 	evcntlzw r0,r1
++  30:	10 01 02 0e 	evcntlsw r0,r1
++  34:	10 01 12 0f 	brinc   r0,r1,r2
++  38:	10 01 12 11 	evand   r0,r1,r2
++  3c:	10 01 12 12 	evandc  r0,r1,r2
++  40:	10 01 12 16 	evxor   r0,r1,r2
++  44:	10 01 0a 17 	evmr    r0,r1
++  48:	10 01 12 17 	evor    r0,r1,r2
++  4c:	10 01 12 18 	evnor   r0,r1,r2
++  50:	10 01 0a 18 	evnor   r0,r1,r1
++  54:	10 01 12 19 	eveqv   r0,r1,r2
++  58:	10 01 12 1b 	evorc   r0,r1,r2
++  5c:	10 01 12 1e 	evnand  r0,r1,r2
++  60:	10 01 12 20 	evsrwu  r0,r1,r2
++  64:	10 01 12 21 	evsrws  r0,r1,r2
++  68:	10 01 fa 22 	evsrwiu r0,r1,31
++  6c:	10 01 fa 23 	evsrwis r0,r1,31
++  70:	10 01 12 24 	evslw   r0,r1,r2
++  74:	10 01 fa 26 	evslwi  r0,r1,31
++  78:	10 01 12 28 	evrlw   r0,r1,r2
++  7c:	10 10 02 29 	evsplati r0,-16
++  80:	10 01 fa 2a 	evrlwi  r0,r1,31
++  84:	10 10 02 2b 	evsplatfi r0,-16
++  88:	10 01 12 2c 	evmergehi r0,r1,r2
++  8c:	10 01 12 2d 	evmergelo r0,r1,r2
++  90:	10 01 12 2e 	evmergehilo r0,r1,r2
++  94:	10 01 12 2f 	evmergelohi r0,r1,r2
++  98:	10 01 12 30 	evcmpgtu cr0,r1,r2
++  9c:	10 01 12 31 	evcmpgts cr0,r1,r2
++  a0:	10 01 12 32 	evcmpltu cr0,r1,r2
++  a4:	10 01 12 33 	evcmplts cr0,r1,r2
++  a8:	10 01 12 34 	evcmpeq cr0,r1,r2
++  ac:	10 01 12 78 	evsel   r0,r1,r2,cr0
++  b0:	10 01 12 80 	evfsadd r0,r1,r2
++  b4:	10 01 12 81 	evfssub r0,r1,r2
++  b8:	10 01 12 82 	evfsmadd r0,r1,r2
++  bc:	10 01 12 83 	evfsmsub r0,r1,r2
++  c0:	10 01 02 84 	evfsabs r0,r1
++  c4:	10 01 02 85 	evfsnabs r0,r1
++  c8:	10 01 02 86 	evfsneg r0,r1
++  cc:	10 01 12 88 	evfsmul r0,r1,r2
++  d0:	10 01 12 89 	evfsdiv r0,r1,r2
++  d4:	10 01 12 8a 	evfsnmadd r0,r1,r2
++  d8:	10 01 12 8b 	evfsnmsub r0,r1,r2
++  dc:	10 01 12 8c 	evfscmpgt cr0,r1,r2
++  e0:	10 01 12 8d 	evfscmplt cr0,r1,r2
++  e4:	10 01 12 8e 	evfscmpeq cr0,r1,r2
++  e8:	10 00 12 90 	evfscfui r0,r2
++  ec:	10 00 12 91 	evfscfsi r0,r2
++  f0:	10 00 12 92 	evfscfuf r0,r2
++  f4:	10 00 12 93 	evfscfsf r0,r2
++  f8:	10 00 12 94 	evfsctui r0,r2
++  fc:	10 00 12 95 	evfsctsi r0,r2
++ 100:	10 00 12 96 	evfsctuf r0,r2
++ 104:	10 00 12 97 	evfsctsf r0,r2
++ 108:	10 00 12 98 	evfsctuiz r0,r2
++ 10c:	10 00 12 9a 	evfsctsiz r0,r2
++ 110:	10 01 12 9c 	evfststgt cr0,r1,r2
++ 114:	10 01 12 9d 	evfststlt cr0,r1,r2
++ 118:	10 01 12 9e 	evfststeq cr0,r1,r2
++ 11c:	10 01 13 00 	evlddx  r0,r1,r2
++ 120:	10 01 0b 01 	evldd   r0,8\(r1\)
++ 124:	10 01 13 02 	evldwx  r0,r1,r2
++ 128:	10 01 0b 03 	evldw   r0,8\(r1\)
++ 12c:	10 01 13 04 	evldhx  r0,r1,r2
++ 130:	10 01 0b 05 	evldh   r0,8\(r1\)
++ 134:	10 01 13 08 	evlhhesplatx r0,r1,r2
++ 138:	10 01 0b 09 	evlhhesplat r0,2\(r1\)
++ 13c:	10 01 13 0c 	evlhhousplatx r0,r1,r2
++ 140:	10 01 0b 0d 	evlhhousplat r0,2\(r1\)
++ 144:	10 01 13 0e 	evlhhossplatx r0,r1,r2
++ 148:	10 01 0b 0f 	evlhhossplat r0,2\(r1\)
++ 14c:	10 01 13 10 	evlwhex r0,r1,r2
++ 150:	10 01 0b 11 	evlwhe  r0,4\(r1\)
++ 154:	10 01 13 14 	evlwhoux r0,r1,r2
++ 158:	10 01 0b 15 	evlwhou r0,4\(r1\)
++ 15c:	10 01 13 16 	evlwhosx r0,r1,r2
++ 160:	10 01 0b 17 	evlwhos r0,4\(r1\)
++ 164:	10 01 13 18 	evlwwsplatx r0,r1,r2
++ 168:	10 01 0b 19 	evlwwsplat r0,4\(r1\)
++ 16c:	10 01 13 1c 	evlwhsplatx r0,r1,r2
++ 170:	10 01 0b 1d 	evlwhsplat r0,4\(r1\)
++ 174:	10 01 13 20 	evstddx r0,r1,r2
++ 178:	10 01 0b 21 	evstdd  r0,8\(r1\)
++ 17c:	10 01 13 22 	evstdwx r0,r1,r2
++ 180:	10 01 0b 23 	evstdw  r0,8\(r1\)
++ 184:	10 01 13 24 	evstdhx r0,r1,r2
++ 188:	10 01 0b 25 	evstdh  r0,8\(r1\)
++ 18c:	10 01 13 30 	evstwhex r0,r1,r2
++ 190:	10 01 0b 31 	evstwhe r0,4\(r1\)
++ 194:	10 01 13 34 	evstwhox r0,r1,r2
++ 198:	10 01 0b 35 	evstwho r0,4\(r1\)
++ 19c:	10 01 13 38 	evstwwex r0,r1,r2
++ 1a0:	10 01 0b 39 	evstwwe r0,4\(r1\)
++ 1a4:	10 01 13 3c 	evstwwox r0,r1,r2
++ 1a8:	10 01 0b 3d 	evstwwo r0,4\(r1\)
++ 1ac:	10 01 14 03 	evmhessf r0,r1,r2
++ 1b0:	10 01 14 07 	evmhossf r0,r1,r2
++ 1b4:	10 01 14 08 	evmheumi r0,r1,r2
++ 1b8:	10 01 14 09 	evmhesmi r0,r1,r2
++ 1bc:	10 01 14 0b 	evmhesmf r0,r1,r2
++ 1c0:	10 01 14 0c 	evmhoumi r0,r1,r2
++ 1c4:	10 01 14 0d 	evmhosmi r0,r1,r2
++ 1c8:	10 01 14 0f 	evmhosmf r0,r1,r2
++ 1cc:	10 01 14 23 	evmhessfa r0,r1,r2
++ 1d0:	10 01 14 27 	evmhossfa r0,r1,r2
++ 1d4:	10 01 14 28 	evmheumia r0,r1,r2
++ 1d8:	10 01 14 29 	evmhesmia r0,r1,r2
++ 1dc:	10 01 14 2b 	evmhesmfa r0,r1,r2
++ 1e0:	10 01 14 2c 	evmhoumia r0,r1,r2
++ 1e4:	10 01 14 2d 	evmhosmia r0,r1,r2
++ 1e8:	10 01 14 2f 	evmhosmfa r0,r1,r2
++ 1ec:	10 01 14 43 	evmwlssf r0,r1,r2
++ 1f0:	10 01 14 47 	evmwhssf r0,r1,r2
++ 1f4:	10 01 14 48 	evmwlumi r0,r1,r2
++ 1f8:	10 01 14 4b 	evmwlsmf r0,r1,r2
++ 1fc:	10 01 14 4c 	evmwhumi r0,r1,r2
++ 200:	10 01 14 4d 	evmwhsmi r0,r1,r2
++ 204:	10 01 14 4f 	evmwhsmf r0,r1,r2
++ 208:	10 01 14 53 	evmwssf r0,r1,r2
++ 20c:	10 01 14 58 	evmwumi r0,r1,r2
++ 210:	10 01 14 59 	evmwsmi r0,r1,r2
++ 214:	10 01 14 5b 	evmwsmf r0,r1,r2
++ 218:	10 01 14 63 	evmwlssfa r0,r1,r2
++ 21c:	10 01 14 67 	evmwhssfa r0,r1,r2
++ 220:	10 01 14 68 	evmwlumia r0,r1,r2
++ 224:	10 01 14 6b 	evmwlsmfa r0,r1,r2
++ 228:	10 01 14 6c 	evmwhumia r0,r1,r2
++ 22c:	10 01 14 6d 	evmwhsmia r0,r1,r2
++ 230:	10 01 14 6f 	evmwhsmfa r0,r1,r2
++ 234:	10 01 14 73 	evmwssfa r0,r1,r2
++ 238:	10 01 14 78 	evmwumia r0,r1,r2
++ 23c:	10 01 14 79 	evmwsmia r0,r1,r2
++ 240:	10 01 14 7b 	evmwsmfa r0,r1,r2
++ 244:	10 01 04 c0 	evaddusiaaw r0,r1
++ 248:	10 01 04 c1 	evaddssiaaw r0,r1
++ 24c:	10 01 04 c2 	evsubfusiaaw r0,r1
++ 250:	10 01 04 c3 	evsubfssiaaw r0,r1
++ 254:	10 01 04 c4 	evmra   r0,r1
++ 258:	10 01 14 c6 	evdivws r0,r1,r2
++ 25c:	10 01 14 c7 	evdivwu r0,r1,r2
++ 260:	10 01 04 c8 	evaddumiaaw r0,r1
++ 264:	10 01 04 c9 	evaddsmiaaw r0,r1
++ 268:	10 01 04 ca 	evsubfumiaaw r0,r1
++ 26c:	10 01 04 cb 	evsubfsmiaaw r0,r1
++ 270:	10 01 15 00 	evmheusiaaw r0,r1,r2
++ 274:	10 01 15 01 	evmhessiaaw r0,r1,r2
++ 278:	10 01 15 03 	evmhessfaaw r0,r1,r2
++ 27c:	10 01 15 04 	evmhousiaaw r0,r1,r2
++ 280:	10 01 15 05 	evmhossiaaw r0,r1,r2
++ 284:	10 01 15 07 	evmhossfaaw r0,r1,r2
++ 288:	10 01 15 08 	evmheumiaaw r0,r1,r2
++ 28c:	10 01 15 09 	evmhesmiaaw r0,r1,r2
++ 290:	10 01 15 0b 	evmhesmfaaw r0,r1,r2
++ 294:	10 01 15 0c 	evmhoumiaaw r0,r1,r2
++ 298:	10 01 15 0d 	evmhosmiaaw r0,r1,r2
++ 29c:	10 01 15 0f 	evmhosmfaaw r0,r1,r2
++ 2a0:	10 01 15 28 	evmhegumiaa r0,r1,r2
++ 2a4:	10 01 15 29 	evmhegsmiaa r0,r1,r2
++ 2a8:	10 01 15 2b 	evmhegsmfaa r0,r1,r2
++ 2ac:	10 01 15 2c 	evmhogumiaa r0,r1,r2
++ 2b0:	10 01 15 2d 	evmhogsmiaa r0,r1,r2
++ 2b4:	10 01 15 2f 	evmhogsmfaa r0,r1,r2
++ 2b8:	10 01 15 40 	evmwlusiaaw r0,r1,r2
++ 2bc:	10 01 15 41 	evmwlssiaaw r0,r1,r2
++ 2c0:	10 01 15 43 	evmwlssfaaw r0,r1,r2
++ 2c4:	10 01 15 44 	evmwhusiaa r0,r1,r2
++ 2c8:	10 01 15 45 	evmwhssmaa r0,r1,r2
++ 2cc:	10 01 15 47 	evmwhssfaa r0,r1,r2
++ 2d0:	10 01 15 48 	evmwlumiaaw r0,r1,r2
++ 2d4:	10 01 15 49 	evmwlsmiaaw r0,r1,r2
++ 2d8:	10 01 15 4b 	evmwlsmfaaw r0,r1,r2
++ 2dc:	10 01 15 4c 	evmwhumiaa r0,r1,r2
++ 2e0:	10 01 15 4d 	evmwhsmiaa r0,r1,r2
++ 2e4:	10 01 15 4f 	evmwhsmfaa r0,r1,r2
++ 2e8:	10 01 15 53 	evmwssfaa r0,r1,r2
++ 2ec:	10 01 15 58 	evmwumiaa r0,r1,r2
++ 2f0:	10 01 15 59 	evmwsmiaa r0,r1,r2
++ 2f4:	10 01 15 5b 	evmwsmfaa r0,r1,r2
++ 2f8:	10 01 15 64 	evmwhgumiaa r0,r1,r2
++ 2fc:	10 01 15 65 	evmwhgsmiaa r0,r1,r2
++ 300:	10 01 15 67 	evmwhgssfaa r0,r1,r2
++ 304:	10 01 15 6f 	evmwhgsmfaa r0,r1,r2
++ 308:	10 01 15 80 	evmheusianw r0,r1,r2
++ 30c:	10 01 15 81 	evmhessianw r0,r1,r2
++ 310:	10 01 15 83 	evmhessfanw r0,r1,r2
++ 314:	10 01 15 84 	evmhousianw r0,r1,r2
++ 318:	10 01 15 85 	evmhossianw r0,r1,r2
++ 31c:	10 01 15 87 	evmhossfanw r0,r1,r2
++ 320:	10 01 15 88 	evmheumianw r0,r1,r2
++ 324:	10 01 15 89 	evmhesmianw r0,r1,r2
++ 328:	10 01 15 8b 	evmhesmfanw r0,r1,r2
++ 32c:	10 01 15 8c 	evmhoumianw r0,r1,r2
++ 330:	10 01 15 8d 	evmhosmianw r0,r1,r2
++ 334:	10 01 15 8f 	evmhosmfanw r0,r1,r2
++ 338:	10 01 15 a8 	evmhegumian r0,r1,r2
++ 33c:	10 01 15 a9 	evmhegsmian r0,r1,r2
++ 340:	10 01 15 ab 	evmhegsmfan r0,r1,r2
++ 344:	10 01 15 ac 	evmhogumian r0,r1,r2
++ 348:	10 01 15 ad 	evmhogsmian r0,r1,r2
++ 34c:	10 01 15 af 	evmhogsmfan r0,r1,r2
++ 350:	10 01 15 c0 	evmwlusianw r0,r1,r2
++ 354:	10 01 15 c1 	evmwlssianw r0,r1,r2
++ 358:	10 01 15 c3 	evmwlssfanw r0,r1,r2
++ 35c:	10 01 15 c4 	evmwhusian r0,r1,r2
++ 360:	10 01 15 c5 	evmwhssian r0,r1,r2
++ 364:	10 01 15 c7 	evmwhssfan r0,r1,r2
++ 368:	10 01 15 c8 	evmwlumianw r0,r1,r2
++ 36c:	10 01 15 c9 	evmwlsmianw r0,r1,r2
++ 370:	10 01 15 cb 	evmwlsmfanw r0,r1,r2
++ 374:	10 01 15 cc 	evmwhumian r0,r1,r2
++ 378:	10 01 15 cd 	evmwhsmian r0,r1,r2
++ 37c:	10 01 15 cf 	evmwhsmfan r0,r1,r2
++ 380:	10 01 15 d3 	evmwssfan r0,r1,r2
++ 384:	10 01 15 d8 	evmwumian r0,r1,r2
++ 388:	10 01 15 d9 	evmwsmian r0,r1,r2
++ 38c:	10 01 15 db 	evmwsmfan r0,r1,r2
++ 390:	10 01 15 e4 	evmwhgumian r0,r1,r2
++ 394:	10 01 15 e5 	evmwhgsmian r0,r1,r2
++ 398:	10 01 15 e7 	evmwhgssfan r0,r1,r2
++ 39c:	10 01 15 ef 	evmwhgsmfan r0,r1,r2
++ 3a0:	7c 01 16 3e 	evlddepx r0,r1,r2
++ 3a4:	7c 01 17 3e 	evstddepx r0,r1,r2
++ 3a8:	10 01 12 c0 	efsadd  r0,r1,r2
++ 3ac:	10 01 12 c1 	efssub  r0,r1,r2
++ 3b0:	10 01 02 c4 	efsabs  r0,r1
++ 3b4:	10 01 02 c5 	efsnabs r0,r1
++ 3b8:	10 01 02 c6 	efsneg  r0,r1
++ 3bc:	10 01 12 c8 	efsmul  r0,r1,r2
++ 3c0:	10 01 12 c9 	efsdiv  r0,r1,r2
++ 3c4:	10 01 12 cc 	efscmpgt cr0,r1,r2
++ 3c8:	10 01 12 cd 	efscmplt cr0,r1,r2
++ 3cc:	10 01 12 ce 	efscmpeq cr0,r1,r2
++ 3d0:	10 00 12 d0 	efscfui r0,r2
++ 3d4:	10 00 12 d1 	efscfsi r0,r2
++ 3d8:	10 00 12 d2 	efscfuf r0,r2
++ 3dc:	10 00 12 d3 	efscfsf r0,r2
++ 3e0:	10 00 12 d4 	efsctui r0,r2
++ 3e4:	10 00 12 d5 	efsctsi r0,r2
++ 3e8:	10 00 12 d6 	efsctuf r0,r2
++ 3ec:	10 00 12 d7 	efsctsf r0,r2
++ 3f0:	10 00 12 d8 	efsctuiz r0,r2
++ 3f4:	10 00 12 da 	efsctsiz r0,r2
++ 3f8:	10 01 12 dc 	efststgt cr0,r1,r2
++ 3fc:	10 01 12 dd 	efststlt cr0,r1,r2
++ 400:	10 01 12 de 	efststeq cr0,r1,r2
+diff --git a/gas/testsuite/gas/ppc/spe.s b/gas/testsuite/gas/ppc/spe.s
+new file mode 100644
+index 0000000..b71f73f
+--- /dev/null
++++ b/gas/testsuite/gas/ppc/spe.s
+@@ -0,0 +1,274 @@
++# PA SPE instructions
++	.section ".text"
++	.equ	rA,1
++	.equ	rB,2
++	.equ	rD,0
++	.equ	rS,0
++	.equ	rT,0
++	.equ	UIMM, 31
++	.equ	UIMM_2, 2
++	.equ	UIMM_4, 4
++	.equ	UIMM_8, 8
++	.equ	SIMM, -16
++	.equ	crD, 0
++	.equ	crS, 0
++
++	evaddw          rS, rA, rB
++	evaddiw         rS, rB, UIMM
++	evsubfw         rS, rA, rB
++	evsubw          rS, rB, rA
++	evsubifw        rS, UIMM, rB
++	evsubiw         rS, rB, UIMM
++	evabs           rS, rA
++	evneg           rS, rA
++	evextsb         rS, rA
++	evextsh         rS, rA
++	evrndw          rS, rA
++	evcntlzw        rS, rA
++	evcntlsw        rS, rA
++	brinc           rS, rA, rB
++	evand           rS, rA, rB
++	evandc          rS, rA, rB
++	evxor           rS, rA, rB
++	evmr            rS, rA
++	evor            rS, rA, rB
++	evnor           rS, rA, rB
++	evnot           rS, rA
++	eveqv           rS, rA, rB
++	evorc           rS, rA, rB
++	evnand          rS, rA, rB
++	evsrwu          rS, rA, rB
++	evsrws          rS, rA, rB
++	evsrwiu         rS, rA, UIMM
++	evsrwis         rS, rA, UIMM
++	evslw           rS, rA, rB
++	evslwi          rS, rA, UIMM
++	evrlw           rS, rA, rB
++	evsplati        rS, SIMM
++	evrlwi          rS, rA, UIMM
++	evsplatfi       rS, SIMM
++	evmergehi       rS, rA, rB
++	evmergelo       rS, rA, rB
++	evmergehilo     rS, rA, rB
++	evmergelohi     rS, rA, rB
++	evcmpgtu        crD, rA, rB
++	evcmpgts        crD, rA, rB
++	evcmpltu        crD, rA, rB
++	evcmplts        crD, rA, rB
++	evcmpeq         crD, rA, rB
++	evsel           rS, rA, rB, crS
++	evfsadd         rS, rA, rB
++	evfssub         rS, rA, rB
++	evfsmadd        rS, rA, rB  
++	evfsmsub        rS, rA, rB  
++	evfsabs         rS, rA
++	evfsnabs        rS, rA
++	evfsneg         rS, rA
++	evfsmul         rS, rA, rB
++	evfsdiv         rS, rA, rB
++	evfsnmadd       rS, rA, rB  
++	evfsnmsub       rS, rA, rB  
++	evfscmpgt       crD, rA, rB
++	evfscmplt       crD, rA, rB
++	evfscmpeq       crD, rA, rB
++	evfscfui        rS, rB
++	evfscfsi        rS, rB
++	evfscfuf        rS, rB
++	evfscfsf        rS, rB
++	evfsctui        rS, rB
++	evfsctsi        rS, rB
++	evfsctuf        rS, rB
++	evfsctsf        rS, rB
++	evfsctuiz       rS, rB
++	evfsctsiz       rS, rB
++	evfststgt       crD, rA, rB
++	evfststlt       crD, rA, rB
++	evfststeq       crD, rA, rB
++	evlddx          rS, rA, rB
++	evldd           rS, UIMM_8(rA)
++	evldwx          rS, rA, rB
++	evldw           rS, UIMM_8(rA)
++	evldhx          rS, rA, rB
++	evldh           rS, UIMM_8(rA)
++	evlhhesplatx    rS, rA, rB
++	evlhhesplat     rS, UIMM_2(rA)
++	evlhhousplatx   rS, rA, rB
++	evlhhousplat    rS, UIMM_2(rA)
++	evlhhossplatx   rS, rA, rB
++	evlhhossplat    rS, UIMM_2(rA)
++	evlwhex         rS, rA, rB
++	evlwhe          rS, UIMM_4(rA)
++	evlwhoux        rS, rA, rB
++	evlwhou         rS, UIMM_4(rA)
++	evlwhosx        rS, rA, rB
++	evlwhos         rS, UIMM_4(rA)
++	evlwwsplatx     rS, rA, rB
++	evlwwsplat      rS, UIMM_4(rA)
++	evlwhsplatx     rS, rA, rB
++	evlwhsplat      rS, UIMM_4(rA)
++	evstddx         rS, rA, rB
++	evstdd          rS, UIMM_8(rA)
++	evstdwx         rS, rA, rB
++	evstdw          rS, UIMM_8(rA)
++	evstdhx         rS, rA, rB
++	evstdh          rS, UIMM_8(rA)
++	evstwhex        rS, rA, rB
++	evstwhe         rS, UIMM_4(rA)
++	evstwhox        rS, rA, rB
++	evstwho         rS, UIMM_4(rA)
++	evstwwex        rS, rA, rB
++	evstwwe         rS, UIMM_4(rA)
++	evstwwox        rS, rA, rB
++	evstwwo         rS, UIMM_4(rA)
++	evmhessf        rS, rA, rB
++	evmhossf        rS, rA, rB
++	evmheumi        rS, rA, rB
++	evmhesmi        rS, rA, rB
++	evmhesmf        rS, rA, rB
++	evmhoumi        rS, rA, rB
++	evmhosmi        rS, rA, rB
++	evmhosmf        rS, rA, rB
++	evmhessfa       rS, rA, rB
++	evmhossfa       rS, rA, rB
++	evmheumia       rS, rA, rB
++	evmhesmia       rS, rA, rB
++	evmhesmfa       rS, rA, rB
++	evmhoumia       rS, rA, rB
++	evmhosmia       rS, rA, rB
++	evmhosmfa       rS, rA, rB
++	evmwlssf        rD, rA, rB
++	evmwhssf        rS, rA, rB
++	evmwlumi        rS, rA, rB
++	evmwlsmf        rD, rA, rB
++	evmwhumi        rS, rA, rB
++	evmwhsmi        rS, rA, rB
++	evmwhsmf        rS, rA, rB
++	evmwssf         rS, rA, rB
++	evmwumi         rS, rA, rB
++	evmwsmi         rS, rA, rB
++	evmwsmf         rS, rA, rB
++	evmwlssfa       rD, rA, rB
++	evmwhssfa       rS, rA, rB
++	evmwlumia       rS, rA, rB
++	evmwlsmfa       rD, rA, rB
++	evmwhumia       rS, rA, rB
++	evmwhsmia       rS, rA, rB
++	evmwhsmfa       rS, rA, rB
++	evmwssfa        rS, rA, rB
++	evmwumia        rS, rA, rB
++	evmwsmia        rS, rA, rB
++	evmwsmfa        rS, rA, rB
++	evaddusiaaw     rS, rA
++	evaddssiaaw     rS, rA
++	evsubfusiaaw    rS, rA
++	evsubfssiaaw    rS, rA
++	evmra           rS, rA
++	evdivws         rS, rA, rB
++	evdivwu         rS, rA, rB
++	evaddumiaaw     rS, rA
++	evaddsmiaaw     rS, rA
++	evsubfumiaaw    rS, rA
++	evsubfsmiaaw    rS, rA
++	evmheusiaaw     rS, rA, rB
++	evmhessiaaw     rS, rA, rB
++	evmhessfaaw     rS, rA, rB
++	evmhousiaaw     rS, rA, rB
++	evmhossiaaw     rS, rA, rB
++	evmhossfaaw     rS, rA, rB
++	evmheumiaaw     rS, rA, rB
++	evmhesmiaaw     rS, rA, rB
++	evmhesmfaaw     rS, rA, rB
++	evmhoumiaaw     rS, rA, rB
++	evmhosmiaaw     rS, rA, rB
++	evmhosmfaaw     rS, rA, rB
++	evmhegumiaa     rS, rA, rB
++	evmhegsmiaa     rS, rA, rB
++	evmhegsmfaa     rS, rA, rB
++	evmhogumiaa     rS, rA, rB
++	evmhogsmiaa     rS, rA, rB
++	evmhogsmfaa     rS, rA, rB
++	evmwlusiaaw     rS, rA, rB
++	evmwlssiaaw     rS, rA, rB
++	evmwlssfaaw     rD, rA, rB
++	evmwhusiaa      rD, rA, rB
++	evmwhssmaa      rD, rA, rB
++	evmwhssfaa      rD, rA, rB
++	evmwlumiaaw     rS, rA, rB
++	evmwlsmiaaw     rS, rA, rB
++	evmwlsmfaaw     rD, rA, rB
++	evmwhumiaa      rD, rA, rB
++	evmwhsmiaa      rD, rA, rB
++	evmwhsmfaa      rD, rA, rB
++	evmwssfaa       rS, rA, rB
++	evmwumiaa       rS, rA, rB
++	evmwsmiaa       rS, rA, rB
++	evmwsmfaa       rS, rA, rB
++	evmwhgumiaa     rD, rA, rB
++	evmwhgsmiaa     rD, rA, rB
++	evmwhgssfaa     rD, rA, rB
++	evmwhgsmfaa     rD, rA, rB
++	evmheusianw     rS, rA, rB
++	evmhessianw     rS, rA, rB
++	evmhessfanw     rS, rA, rB
++	evmhousianw     rS, rA, rB
++	evmhossianw     rS, rA, rB
++	evmhossfanw     rS, rA, rB
++	evmheumianw     rS, rA, rB
++	evmhesmianw     rS, rA, rB
++	evmhesmfanw     rS, rA, rB
++	evmhoumianw     rS, rA, rB
++	evmhosmianw     rS, rA, rB
++	evmhosmfanw     rS, rA, rB
++	evmhegumian     rS, rA, rB
++	evmhegsmian     rS, rA, rB
++	evmhegsmfan     rS, rA, rB
++	evmhogumian     rS, rA, rB
++	evmhogsmian     rS, rA, rB
++	evmhogsmfan     rS, rA, rB
++	evmwlusianw     rS, rA, rB
++	evmwlssianw     rS, rA, rB
++	evmwlssfanw     rD, rA, rB
++	evmwhusian      rD, rA, rB
++	evmwhssian      rD, rA, rB
++	evmwhssfan      rD, rA, rB
++	evmwlumianw     rS, rA, rB
++	evmwlsmianw     rS, rA, rB
++	evmwlsmfanw     rD, rA, rB
++	evmwhumian      rD, rA, rB
++	evmwhsmian      rD, rA, rB
++	evmwhsmfan      rD, rA, rB
++	evmwssfan       rS, rA, rB
++	evmwumian       rS, rA, rB
++	evmwsmian       rS, rA, rB
++	evmwsmfan       rS, rA, rB
++	evmwhgumian     rD, rA, rB
++	evmwhgsmian     rD, rA, rB
++	evmwhgssfan     rD, rA, rB
++	evmwhgsmfan     rD, rA, rB
++	evlddepx        rT, rA, rB
++	evstddepx       rT, rA, rB
++
++;#SPE mapped by macro
++	evsadd          rS, rA, rB
++	evssub          rS, rA, rB
++	evsabs          rS, rA
++	evsnabs         rS, rA
++	evsneg          rS, rA
++	evsmul          rS, rA, rB
++	evsdiv          rS, rA, rB
++	evscmpgt        crD, rA, rB
++	evsgmplt        crD, rA, rB
++	evsgmpeq        crD, rA, rB
++	evscfui         rS, rB
++	evscfsi         rS, rB
++	evscfuf         rS, rB
++	evscfsf         rS, rB
++	evsctui         rS, rB
++	evsctsi         rS, rB
++	evsctuf         rS, rB
++	evsctsf         rS, rB
++	evsctuiz        rS, rB
++	evsctsiz        rS, rB
++	evststgt        crD, rA, rB
++	evststlt        crD, rA, rB
++	evststeq        crD, rA, rB
+diff --git a/gas/testsuite/gas/ppc/spe2-checks.d b/gas/testsuite/gas/ppc/spe2-checks.d
+new file mode 100644
+index 0000000..1ca1017
+--- /dev/null
++++ b/gas/testsuite/gas/ppc/spe2-checks.d
+@@ -0,0 +1,4 @@
++#as: -mvle -mspe2
++#name: Test SPE2 operands checks
++#error-output: spe2-checks.l
++
+diff --git a/gas/testsuite/gas/ppc/spe2-checks.l b/gas/testsuite/gas/ppc/spe2-checks.l
+new file mode 100644
+index 0000000..276c650
+--- /dev/null
++++ b/gas/testsuite/gas/ppc/spe2-checks.l
+@@ -0,0 +1,73 @@
++[^:]*: Assembler messages:
++.*:29: Error: operand out of range \(32 is not between 0 and 31\)
++.*:30: Error: operand out of range \(32 is not between 0 and 31\)
++.*:31: Error: operand out of range \(32 is not between 0 and 31\)
++.*:32: Error: operand out of range \(32 is not between 0 and 31\)
++.*:33: Error: operand out of range \(8 is not between 0 and 7\)
++.*:34: Error: operand out of range \(8 is not between 0 and 7\)
++.*:35: Error: operand out of range \(4 is not between 0 and 3\)
++.*:36: Error: operand out of range \(8 is not between 0 and 7\)
++.*:37: Error: operand out of range \(4 is not between 0 and 3\)
++.*:38: Error: operand out of range \(16 is not between 0 and 15\)
++.*:39: Error: operand out of range \(16 is not between 0 and 15\)
++.*:40: Error: operand out of range \(16 is not between 0 and 15\)
++.*:41: Error: operand out of range \(4 is not between 0 and 3\)
++.*:42: Error: operand out of range \(4 is not between 0 and 3\)
++.*:43: Error: invalid offset
++.*:44: Error: operand out of range \(8 is not between 0 and 7\)
++.*:44: Error: invalid offset
++.*:45: Error: UIMM values >7 are illegal
++.*:46: Error: UIMM values >7 are illegal
++.*:47: Error: UIMM values >7 are illegal
++.*:48: Error: UIMM values >7 are illegal
++.*:49: Error: UIMM values >15 are illegal
++.*:50: Error: UIMM values >15 are illegal
++.*:51: Error: UIMM values >15 are illegal
++.*:52: Error: UIMM values >15 are illegal
++.*:53: Error: operand out of range \(8 is not between 0 and 7\)
++.*:54: Error: operand out of range \(8 is not between 0 and 7\)
++.*:55: Error: operand out of range \(8 is not between 0 and 7\)
++.*:56: Error: operand out of domain \(7 is not a multiple of 8\)
++.*:57: Error: operand out of domain \(1 is not a multiple of 2\)
++.*:58: Error: operand out of domain \(3 is not a multiple of 4\)
++.*:59: Error: operand out of domain \(3 is not a multiple of 4\)
++.*:60: Error: operand out of range \(32 is not between 0 and 31\)
++.*:61: Error: operand out of domain \(7 is not a multiple of 8\)
++.*:62: Error: operand out of domain \(3 is not a multiple of 4\)
++.*:63: Error: operand out of domain \(3 is not a multiple of 4\)
++.*:64: Error: operand out of domain \(3 is not a multiple of 4\)
++.*:65: Error: operand out of domain \(3 is not a multiple of 4\)
++.*:66: Error: operand out of domain \(3 is not a multiple of 4\)
++.*:67: Error: operand out of domain \(3 is not a multiple of 4\)
++.*:68: Error: operand out of domain \(1 is not a multiple of 2\)
++.*:69: Error: operand out of domain \(7 is not a multiple of 8\)
++.*:70: Error: operand out of domain \(7 is not a multiple of 8\)
++.*:71: Error: operand out of domain \(7 is not a multiple of 8\)
++.*:72: Error: operand out of domain \(7 is not a multiple of 8\)
++.*:73: Error: operand out of domain \(1 is not a multiple of 2\)
++.*:74: Error: operand out of domain \(1 is not a multiple of 2\)
++.*:75: Error: operand out of domain \(1 is not a multiple of 2\)
++.*:76: Error: operand out of domain \(1 is not a multiple of 2\)
++.*:77: Error: operand out of domain \(3 is not a multiple of 4\)
++.*:78: Error: operand out of domain \(3 is not a multiple of 4\)
++.*:79: Error: operand out of domain \(3 is not a multiple of 4\)
++.*:80: Error: operand out of domain \(3 is not a multiple of 4\)
++.*:81: Error: operand out of domain \(3 is not a multiple of 4\)
++.*:82: Error: operand out of domain \(3 is not a multiple of 4\)
++.*:83: Error: operand out of domain \(3 is not a multiple of 4\)
++.*:84: Error: UIMM = 00000 is illegal
++.*:85: Error: operand out of domain \(7 is not a multiple of 8\)
++.*:86: Error: operand out of domain \(7 is not a multiple of 8\)
++.*:87: Error: operand out of domain \(7 is not a multiple of 8\)
++.*:88: Error: operand out of domain \(7 is not a multiple of 8\)
++.*:89: Error: operand out of domain \(3 is not a multiple of 4\)
++.*:90: Error: operand out of domain \(3 is not a multiple of 4\)
++.*:91: Error: operand out of domain \(3 is not a multiple of 4\)
++.*:92: Error: operand out of domain \(3 is not a multiple of 4\)
++.*:93: Error: operand out of domain \(3 is not a multiple of 4\)
++.*:94: Error: operand out of domain \(3 is not a multiple of 4\)
++.*:95: Error: operand out of domain \(3 is not a multiple of 4\)
++.*:96: Error: operand out of domain \(3 is not a multiple of 4\)
++.*:97: Error: operand out of domain \(3 is not a multiple of 4\)
++.*:98: Error: operand out of domain \(3 is not a multiple of 4\)
++.*:99: Error: operand out of domain \(1 is not a multiple of 2\)
+\ No newline at end of file
+diff --git a/gas/testsuite/gas/ppc/spe2-checks.s b/gas/testsuite/gas/ppc/spe2-checks.s
+new file mode 100644
+index 0000000..b1fd776
+--- /dev/null
++++ b/gas/testsuite/gas/ppc/spe2-checks.s
+@@ -0,0 +1,99 @@
++# PA SPE2 instructions
++	.section ".text"
++
++	.equ	rA,1
++	.equ	rB,2
++	.equ	rD,0
++	.equ	rS,0
++	.equ	UIMM_ILL, 32
++	.equ	UIMM_1_ZERO, 0
++	.equ	UIMM_1_ILL, 32
++	.equ	UIMM_2_ILL, 1
++	.equ	UIMM_4_ILL, 3
++	.equ	UIMM_8_ILL, 7
++	.equ	UIMM_GT7,   8
++	.equ	UIMM_GT15,  16
++	.equ	nnn_ILL,     8
++	.equ	bbb_ILL,     8
++	.equ	dd,          3
++	.equ	dd_ILL,      4
++	.equ	Ddd,         7
++	.equ	Ddd_ILL,     8
++	.equ	hh,          3
++	.equ	hh_ILL,      4
++	.equ	mask_ILL,   16
++	.equ	offset_ILL0, 0
++	.equ	offset_ILL,  8
++
++
++	evaddib               rD, rB, UIMM_ILL
++	evaddih               rD, rB, UIMM_ILL
++	evsubifh              rD, UIMM_ILL, rB
++	evsubifb              rD, UIMM_ILL, rB
++	evinsb                rD, rA, Ddd, bbb_ILL
++	evxtrb                rD, rA, Ddd, bbb_ILL
++	evsplath              rD, rA, hh_ILL
++	evsplatb              rD, rA, bbb_ILL
++	evinsh                rD, rA, dd_ILL, hh
++	evclrbe               rD, rA, mask_ILL
++	evclrbo               rD, rA, mask_ILL
++	evclrh                rD, rA, mask_ILL
++	evxtrh                rD, rA, dd_ILL, hh
++	evxtrh                rD, rA, dd, hh_ILL
++	evxtrd                rD, rA, rB, offset_ILL0
++	evxtrd                rD, rA, rB, offset_ILL
++	evsrbiu               rD, rA, UIMM_GT7
++	evsrbis               rD, rA, UIMM_GT7
++	evslbi                rD, rA, UIMM_GT7
++	evrlbi                rD, rA, UIMM_GT7
++	evsrhiu               rD, rA, UIMM_GT15
++	evsrhis               rD, rA, UIMM_GT15
++	evslhi                rD, rA, UIMM_GT15
++	evrlhi                rD, rA, UIMM_GT15
++	evsroiu               rD, rA, nnn_ILL
++	evsrois               rD, rA, nnn_ILL
++	evsloi                rD, rA, nnn_ILL
++	evldb                 rD, UIMM_8_ILL (rA)
++	evlhhsplath           rD, UIMM_2_ILL (rA)
++	evlwbsplatw           rD, UIMM_4_ILL (rA)
++	evlwhsplatw           rD, UIMM_4_ILL (rA)
++	evlbbsplatb           rD, UIMM_1_ILL (rA)
++	evstdb                rS, UIMM_8_ILL (rA)
++	evlwbe                rD, UIMM_4_ILL (rA)
++	evlwbou               rD, UIMM_4_ILL (rA)
++	evlwbos               rD, UIMM_4_ILL (rA)
++	evstwbe               rS, UIMM_4_ILL (rA)
++	evstwbo               rS, UIMM_4_ILL (rA)
++	evstwb                rS, UIMM_4_ILL (rA)
++	evsthb                rS, UIMM_2_ILL (rA)
++	evlddu                rD, UIMM_8_ILL (rA)
++	evldwu                rD, UIMM_8_ILL (rA)
++	evldhu                rD, UIMM_8_ILL (rA)
++	evldbu                rD, UIMM_8_ILL (rA)
++	evlhhesplatu          rD, UIMM_2_ILL (rA)
++	evlhhsplathu          rD, UIMM_2_ILL (rA)
++	evlhhousplatu         rD, UIMM_2_ILL (rA)
++	evlhhossplatu         rD, UIMM_2_ILL (rA)
++	evlwheu               rD, UIMM_4_ILL (rA)
++	evlwbsplatwu          rD, UIMM_4_ILL (rA)
++	evlwhouu              rD, UIMM_4_ILL (rA)
++	evlwhosu              rD, UIMM_4_ILL (rA)
++	evlwwsplatu           rD, UIMM_4_ILL (rA)
++	evlwhsplatwu          rD, UIMM_4_ILL (rA)
++	evlwhsplatu           rD, UIMM_4_ILL (rA)
++	evlbbsplatbu          rD, UIMM_1_ZERO (rA)
++	evstddu               rS, UIMM_8_ILL (rA)
++	evstdwu               rS, UIMM_8_ILL (rA)
++	evstdhu               rS, UIMM_8_ILL (rA)
++	evstdbu               rS, UIMM_8_ILL (rA)
++	evlwbeu               rD, UIMM_4_ILL (rA)
++	evlwbouu              rD, UIMM_4_ILL (rA)
++	evlwbosu              rD, UIMM_4_ILL (rA)
++	evstwheu              rS, UIMM_4_ILL (rA)
++	evstwbeu              rS, UIMM_4_ILL (rA)
++	evstwhou              rS, UIMM_4_ILL (rA)
++	evstwbou              rS, UIMM_4_ILL (rA)
++	evstwweu              rS, UIMM_4_ILL (rA)
++	evstwbu               rS, UIMM_4_ILL (rA)
++	evstwwou              rS, UIMM_4_ILL (rA)
++	evsthbu               rS, UIMM_2_ILL (rA)
+diff --git a/gas/testsuite/gas/ppc/spe2.d b/gas/testsuite/gas/ppc/spe2.d
+new file mode 100644
+index 0000000..c9b54e6
+--- /dev/null
++++ b/gas/testsuite/gas/ppc/spe2.d
+@@ -0,0 +1,815 @@
++#as: -mvle -mspe2
++#objdump: -d -Mspe2
++#name: Validate SPE2 instructions
++
++.*: +file format elf.*-powerpc.*
++
++Disassembly of section .text:
++
++00000000 <.text>:
++   0:	10 01 10 80 	evdotpwcssi r0,r1,r2
++   4:	10 01 10 81 	evdotpwcsmi r0,r1,r2
++   8:	10 01 10 82 	evdotpwcssfr r0,r1,r2
++   c:	10 01 10 83 	evdotpwcssf r0,r1,r2
++  10:	10 01 10 88 	evdotpwgasmf r0,r1,r2
++  14:	10 01 10 89 	evdotpwxgasmf r0,r1,r2
++  18:	10 01 10 8a 	evdotpwgasmfr r0,r1,r2
++  1c:	10 01 10 8b 	evdotpwxgasmfr r0,r1,r2
++  20:	10 01 10 8c 	evdotpwgssmf r0,r1,r2
++  24:	10 01 10 8d 	evdotpwxgssmf r0,r1,r2
++  28:	10 01 10 8e 	evdotpwgssmfr r0,r1,r2
++  2c:	10 01 10 8f 	evdotpwxgssmfr r0,r1,r2
++  30:	10 01 10 90 	evdotpwcssiaaw3 r0,r1,r2
++  34:	10 01 10 91 	evdotpwcsmiaaw3 r0,r1,r2
++  38:	10 01 10 92 	evdotpwcssfraaw3 r0,r1,r2
++  3c:	10 01 10 93 	evdotpwcssfaaw3 r0,r1,r2
++  40:	10 01 10 98 	evdotpwgasmfaa3 r0,r1,r2
++  44:	10 01 10 99 	evdotpwxgasmfaa3 r0,r1,r2
++  48:	10 01 10 9a 	evdotpwgasmfraa3 r0,r1,r2
++  4c:	10 01 10 9b 	evdotpwxgasmfraa3 r0,r1,r2
++  50:	10 01 10 9c 	evdotpwgssmfaa3 r0,r1,r2
++  54:	10 01 10 9d 	evdotpwxgssmfaa3 r0,r1,r2
++  58:	10 01 10 9e 	evdotpwgssmfraa3 r0,r1,r2
++  5c:	10 01 10 9f 	evdotpwxgssmfraa3 r0,r1,r2
++  60:	10 01 10 a0 	evdotpwcssia r0,r1,r2
++  64:	10 01 10 a1 	evdotpwcsmia r0,r1,r2
++  68:	10 01 10 a2 	evdotpwcssfra r0,r1,r2
++  6c:	10 01 10 a3 	evdotpwcssfa r0,r1,r2
++  70:	10 01 10 a8 	evdotpwgasmfa r0,r1,r2
++  74:	10 01 10 a9 	evdotpwxgasmfa r0,r1,r2
++  78:	10 01 10 aa 	evdotpwgasmfra r0,r1,r2
++  7c:	10 01 10 ab 	evdotpwxgasmfra r0,r1,r2
++  80:	10 01 10 ac 	evdotpwgssmfa r0,r1,r2
++  84:	10 01 10 ad 	evdotpwxgssmfa r0,r1,r2
++  88:	10 01 10 ae 	evdotpwgssmfra r0,r1,r2
++  8c:	10 01 10 af 	evdotpwxgssmfra r0,r1,r2
++  90:	10 01 10 b0 	evdotpwcssiaaw r0,r1,r2
++  94:	10 01 10 b1 	evdotpwcsmiaaw r0,r1,r2
++  98:	10 01 10 b2 	evdotpwcssfraaw r0,r1,r2
++  9c:	10 01 10 b3 	evdotpwcssfaaw r0,r1,r2
++  a0:	10 01 10 b8 	evdotpwgasmfaa r0,r1,r2
++  a4:	10 01 10 b9 	evdotpwxgasmfaa r0,r1,r2
++  a8:	10 01 10 ba 	evdotpwgasmfraa r0,r1,r2
++  ac:	10 01 10 bb 	evdotpwxgasmfraa r0,r1,r2
++  b0:	10 01 10 bc 	evdotpwgssmfaa r0,r1,r2
++  b4:	10 01 10 bd 	evdotpwxgssmfaa r0,r1,r2
++  b8:	10 01 10 be 	evdotpwgssmfraa r0,r1,r2
++  bc:	10 01 10 bf 	evdotpwxgssmfraa r0,r1,r2
++  c0:	10 01 11 00 	evdotphihcssi r0,r1,r2
++  c4:	10 01 11 01 	evdotplohcssi r0,r1,r2
++  c8:	10 01 11 02 	evdotphihcssf r0,r1,r2
++  cc:	10 01 11 03 	evdotplohcssf r0,r1,r2
++  d0:	10 01 11 08 	evdotphihcsmi r0,r1,r2
++  d4:	10 01 11 09 	evdotplohcsmi r0,r1,r2
++  d8:	10 01 11 0a 	evdotphihcssfr r0,r1,r2
++  dc:	10 01 11 0b 	evdotplohcssfr r0,r1,r2
++  e0:	10 01 11 10 	evdotphihcssiaaw3 r0,r1,r2
++  e4:	10 01 11 11 	evdotplohcssiaaw3 r0,r1,r2
++  e8:	10 01 11 12 	evdotphihcssfaaw3 r0,r1,r2
++  ec:	10 01 11 13 	evdotplohcssfaaw3 r0,r1,r2
++  f0:	10 01 11 18 	evdotphihcsmiaaw3 r0,r1,r2
++  f4:	10 01 11 19 	evdotplohcsmiaaw3 r0,r1,r2
++  f8:	10 01 11 1a 	evdotphihcssfraaw3 r0,r1,r2
++  fc:	10 01 11 1b 	evdotplohcssfraaw3 r0,r1,r2
++ 100:	10 01 11 20 	evdotphihcssia r0,r1,r2
++ 104:	10 01 11 21 	evdotplohcssia r0,r1,r2
++ 108:	10 01 11 22 	evdotphihcssfa r0,r1,r2
++ 10c:	10 01 11 23 	evdotplohcssfa r0,r1,r2
++ 110:	10 01 11 28 	evdotphihcsmia r0,r1,r2
++ 114:	10 01 11 29 	evdotplohcsmia r0,r1,r2
++ 118:	10 01 11 2a 	evdotphihcssfra r0,r1,r2
++ 11c:	10 01 11 2b 	evdotplohcssfra r0,r1,r2
++ 120:	10 01 11 30 	evdotphihcssiaaw r0,r1,r2
++ 124:	10 01 11 31 	evdotplohcssiaaw r0,r1,r2
++ 128:	10 01 11 32 	evdotphihcssfaaw r0,r1,r2
++ 12c:	10 01 11 33 	evdotplohcssfaaw r0,r1,r2
++ 130:	10 01 11 38 	evdotphihcsmiaaw r0,r1,r2
++ 134:	10 01 11 39 	evdotplohcsmiaaw r0,r1,r2
++ 138:	10 01 11 3a 	evdotphihcssfraaw r0,r1,r2
++ 13c:	10 01 11 3b 	evdotplohcssfraaw r0,r1,r2
++ 140:	10 01 11 40 	evdotphausi r0,r1,r2
++ 144:	10 01 11 41 	evdotphassi r0,r1,r2
++ 148:	10 01 11 42 	evdotphasusi r0,r1,r2
++ 14c:	10 01 11 43 	evdotphassf r0,r1,r2
++ 150:	10 01 11 47 	evdotphsssf r0,r1,r2
++ 154:	10 01 11 48 	evdotphaumi r0,r1,r2
++ 158:	10 01 11 49 	evdotphasmi r0,r1,r2
++ 15c:	10 01 11 4a 	evdotphasumi r0,r1,r2
++ 160:	10 01 11 4b 	evdotphassfr r0,r1,r2
++ 164:	10 01 11 4d 	evdotphssmi r0,r1,r2
++ 168:	10 01 11 4f 	evdotphsssfr r0,r1,r2
++ 16c:	10 01 11 50 	evdotphausiaaw3 r0,r1,r2
++ 170:	10 01 11 51 	evdotphassiaaw3 r0,r1,r2
++ 174:	10 01 11 52 	evdotphasusiaaw3 r0,r1,r2
++ 178:	10 01 11 53 	evdotphassfaaw3 r0,r1,r2
++ 17c:	10 01 11 55 	evdotphsssiaaw3 r0,r1,r2
++ 180:	10 01 11 57 	evdotphsssfaaw3 r0,r1,r2
++ 184:	10 01 11 58 	evdotphaumiaaw3 r0,r1,r2
++ 188:	10 01 11 59 	evdotphasmiaaw3 r0,r1,r2
++ 18c:	10 01 11 5a 	evdotphasumiaaw3 r0,r1,r2
++ 190:	10 01 11 5b 	evdotphassfraaw3 r0,r1,r2
++ 194:	10 01 11 5d 	evdotphssmiaaw3 r0,r1,r2
++ 198:	10 01 11 5f 	evdotphsssfraaw3 r0,r1,r2
++ 19c:	10 01 11 60 	evdotphausia r0,r1,r2
++ 1a0:	10 01 11 61 	evdotphassia r0,r1,r2
++ 1a4:	10 01 11 62 	evdotphasusia r0,r1,r2
++ 1a8:	10 01 11 63 	evdotphassfa r0,r1,r2
++ 1ac:	10 01 11 67 	evdotphsssfa r0,r1,r2
++ 1b0:	10 01 11 68 	evdotphaumia r0,r1,r2
++ 1b4:	10 01 11 69 	evdotphasmia r0,r1,r2
++ 1b8:	10 01 11 6a 	evdotphasumia r0,r1,r2
++ 1bc:	10 01 11 6b 	evdotphassfra r0,r1,r2
++ 1c0:	10 01 11 6d 	evdotphssmia r0,r1,r2
++ 1c4:	10 01 11 6f 	evdotphsssfra r0,r1,r2
++ 1c8:	10 01 11 70 	evdotphausiaaw r0,r1,r2
++ 1cc:	10 01 11 71 	evdotphassiaaw r0,r1,r2
++ 1d0:	10 01 11 72 	evdotphasusiaaw r0,r1,r2
++ 1d4:	10 01 11 73 	evdotphassfaaw r0,r1,r2
++ 1d8:	10 01 11 75 	evdotphsssiaaw r0,r1,r2
++ 1dc:	10 01 11 77 	evdotphsssfaaw r0,r1,r2
++ 1e0:	10 01 11 78 	evdotphaumiaaw r0,r1,r2
++ 1e4:	10 01 11 79 	evdotphasmiaaw r0,r1,r2
++ 1e8:	10 01 11 7a 	evdotphasumiaaw r0,r1,r2
++ 1ec:	10 01 11 7b 	evdotphassfraaw r0,r1,r2
++ 1f0:	10 01 11 7d 	evdotphssmiaaw r0,r1,r2
++ 1f4:	10 01 11 7f 	evdotphsssfraaw r0,r1,r2
++ 1f8:	10 01 11 80 	evdotp4hgaumi r0,r1,r2
++ 1fc:	10 01 11 81 	evdotp4hgasmi r0,r1,r2
++ 200:	10 01 11 82 	evdotp4hgasumi r0,r1,r2
++ 204:	10 01 11 83 	evdotp4hgasmf r0,r1,r2
++ 208:	10 01 11 84 	evdotp4hgssmi r0,r1,r2
++ 20c:	10 01 11 85 	evdotp4hgssmf r0,r1,r2
++ 210:	10 01 11 86 	evdotp4hxgasmi r0,r1,r2
++ 214:	10 01 11 87 	evdotp4hxgasmf r0,r1,r2
++ 218:	10 01 11 88 	evdotpbaumi r0,r1,r2
++ 21c:	10 01 11 89 	evdotpbasmi r0,r1,r2
++ 220:	10 01 11 8a 	evdotpbasumi r0,r1,r2
++ 224:	10 01 11 8e 	evdotp4hxgssmi r0,r1,r2
++ 228:	10 01 11 8f 	evdotp4hxgssmf r0,r1,r2
++ 22c:	10 01 11 90 	evdotp4hgaumiaa3 r0,r1,r2
++ 230:	10 01 11 91 	evdotp4hgasmiaa3 r0,r1,r2
++ 234:	10 01 11 92 	evdotp4hgasumiaa3 r0,r1,r2
++ 238:	10 01 11 93 	evdotp4hgasmfaa3 r0,r1,r2
++ 23c:	10 01 11 94 	evdotp4hgssmiaa3 r0,r1,r2
++ 240:	10 01 11 95 	evdotp4hgssmfaa3 r0,r1,r2
++ 244:	10 01 11 96 	evdotp4hxgasmiaa3 r0,r1,r2
++ 248:	10 01 11 97 	evdotp4hxgasmfaa3 r0,r1,r2
++ 24c:	10 01 11 98 	evdotpbaumiaaw3 r0,r1,r2
++ 250:	10 01 11 99 	evdotpbasmiaaw3 r0,r1,r2
++ 254:	10 01 11 9a 	evdotpbasumiaaw3 r0,r1,r2
++ 258:	10 01 11 9e 	evdotp4hxgssmiaa3 r0,r1,r2
++ 25c:	10 01 11 9f 	evdotp4hxgssmfaa3 r0,r1,r2
++ 260:	10 01 11 a0 	evdotp4hgaumia r0,r1,r2
++ 264:	10 01 11 a1 	evdotp4hgasmia r0,r1,r2
++ 268:	10 01 11 a2 	evdotp4hgasumia r0,r1,r2
++ 26c:	10 01 11 a3 	evdotp4hgasmfa r0,r1,r2
++ 270:	10 01 11 a4 	evdotp4hgssmia r0,r1,r2
++ 274:	10 01 11 a5 	evdotp4hgssmfa r0,r1,r2
++ 278:	10 01 11 a6 	evdotp4hxgasmia r0,r1,r2
++ 27c:	10 01 11 a7 	evdotp4hxgasmfa r0,r1,r2
++ 280:	10 01 11 a8 	evdotpbaumia r0,r1,r2
++ 284:	10 01 11 a9 	evdotpbasmia r0,r1,r2
++ 288:	10 01 11 aa 	evdotpbasumia r0,r1,r2
++ 28c:	10 01 11 ae 	evdotp4hxgssmia r0,r1,r2
++ 290:	10 01 11 af 	evdotp4hxgssmfa r0,r1,r2
++ 294:	10 01 11 b0 	evdotp4hgaumiaa r0,r1,r2
++ 298:	10 01 11 b1 	evdotp4hgasmiaa r0,r1,r2
++ 29c:	10 01 11 b2 	evdotp4hgasumiaa r0,r1,r2
++ 2a0:	10 01 11 b3 	evdotp4hgasmfaa r0,r1,r2
++ 2a4:	10 01 11 b4 	evdotp4hgssmiaa r0,r1,r2
++ 2a8:	10 01 11 b5 	evdotp4hgssmfaa r0,r1,r2
++ 2ac:	10 01 11 b6 	evdotp4hxgasmiaa r0,r1,r2
++ 2b0:	10 01 11 b7 	evdotp4hxgasmfaa r0,r1,r2
++ 2b4:	10 01 11 b8 	evdotpbaumiaaw r0,r1,r2
++ 2b8:	10 01 11 b9 	evdotpbasmiaaw r0,r1,r2
++ 2bc:	10 01 11 ba 	evdotpbasumiaaw r0,r1,r2
++ 2c0:	10 01 11 be 	evdotp4hxgssmiaa r0,r1,r2
++ 2c4:	10 01 11 bf 	evdotp4hxgssmfaa r0,r1,r2
++ 2c8:	10 01 11 c0 	evdotpwausi r0,r1,r2
++ 2cc:	10 01 11 c1 	evdotpwassi r0,r1,r2
++ 2d0:	10 01 11 c2 	evdotpwasusi r0,r1,r2
++ 2d4:	10 01 11 c8 	evdotpwaumi r0,r1,r2
++ 2d8:	10 01 11 c9 	evdotpwasmi r0,r1,r2
++ 2dc:	10 01 11 ca 	evdotpwasumi r0,r1,r2
++ 2e0:	10 01 11 cd 	evdotpwssmi r0,r1,r2
++ 2e4:	10 01 11 d0 	evdotpwausiaa3 r0,r1,r2
++ 2e8:	10 01 11 d1 	evdotpwassiaa3 r0,r1,r2
++ 2ec:	10 01 11 d2 	evdotpwasusiaa3 r0,r1,r2
++ 2f0:	10 01 11 d5 	evdotpwsssiaa3 r0,r1,r2
++ 2f4:	10 01 11 d8 	evdotpwaumiaa3 r0,r1,r2
++ 2f8:	10 01 11 d9 	evdotpwasmiaa3 r0,r1,r2
++ 2fc:	10 01 11 da 	evdotpwasumiaa3 r0,r1,r2
++ 300:	10 01 11 dd 	evdotpwssmiaa3 r0,r1,r2
++ 304:	10 01 11 e0 	evdotpwausia r0,r1,r2
++ 308:	10 01 11 e1 	evdotpwassia r0,r1,r2
++ 30c:	10 01 11 e2 	evdotpwasusia r0,r1,r2
++ 310:	10 01 11 e8 	evdotpwaumia r0,r1,r2
++ 314:	10 01 11 e9 	evdotpwasmia r0,r1,r2
++ 318:	10 01 11 ea 	evdotpwasumia r0,r1,r2
++ 31c:	10 01 11 ed 	evdotpwssmia r0,r1,r2
++ 320:	10 01 11 f0 	evdotpwausiaa r0,r1,r2
++ 324:	10 01 11 f1 	evdotpwassiaa r0,r1,r2
++ 328:	10 01 11 f2 	evdotpwasusiaa r0,r1,r2
++ 32c:	10 01 11 f5 	evdotpwsssiaa r0,r1,r2
++ 330:	10 01 11 f8 	evdotpwaumiaa r0,r1,r2
++ 334:	10 01 11 f9 	evdotpwasmiaa r0,r1,r2
++ 338:	10 01 11 fa 	evdotpwasumiaa r0,r1,r2
++ 33c:	10 01 11 fd 	evdotpwssmiaa r0,r1,r2
++ 340:	10 1f 12 03 	evaddib r0,r2,31
++ 344:	10 1f 12 01 	evaddih r0,r2,31
++ 348:	10 1f 12 05 	evsubifh r0,31,r2
++ 34c:	10 1f 12 07 	evsubifb r0,31,r2
++ 350:	10 01 12 08 	evabsb  r0,r1
++ 354:	10 01 22 08 	evabsh  r0,r1
++ 358:	10 01 32 08 	evabsd  r0,r1
++ 35c:	10 01 42 08 	evabss  r0,r1
++ 360:	10 01 52 08 	evabsbs r0,r1
++ 364:	10 01 62 08 	evabshs r0,r1
++ 368:	10 01 72 08 	evabsds r0,r1
++ 36c:	10 01 0a 09 	evnegwo r0,r1
++ 370:	10 01 12 09 	evnegb  r0,r1
++ 374:	10 01 1a 09 	evnegbo r0,r1
++ 378:	10 01 22 09 	evnegh  r0,r1
++ 37c:	10 01 2a 09 	evnegho r0,r1
++ 380:	10 01 32 09 	evnegd  r0,r1
++ 384:	10 01 42 09 	evnegs  r0,r1
++ 388:	10 01 4a 09 	evnegwos r0,r1
++ 38c:	10 01 52 09 	evnegbs r0,r1
++ 390:	10 01 5a 09 	evnegbos r0,r1
++ 394:	10 01 62 09 	evneghs r0,r1
++ 398:	10 01 6a 09 	evneghos r0,r1
++ 39c:	10 01 72 09 	evnegds r0,r1
++ 3a0:	10 01 0a 0a 	evextzb r0,r1
++ 3a4:	10 01 22 0a 	evextsbh r0,r1
++ 3a8:	10 01 32 0b 	evextsw r0,r1
++ 3ac:	10 01 02 0c 	evrndwh r0,r1
++ 3b0:	10 01 22 0c 	evrndhb r0,r1
++ 3b4:	10 01 32 0c 	evrnddw r0,r1
++ 3b8:	10 01 42 0c 	evrndwhus r0,r1
++ 3bc:	10 01 4a 0c 	evrndwhss r0,r1
++ 3c0:	10 01 62 0c 	evrndhbus r0,r1
++ 3c4:	10 01 6a 0c 	evrndhbss r0,r1
++ 3c8:	10 01 72 0c 	evrnddwus r0,r1
++ 3cc:	10 01 7a 0c 	evrnddwss r0,r1
++ 3d0:	10 01 82 0c 	evrndwnh r0,r1
++ 3d4:	10 01 a2 0c 	evrndhnb r0,r1
++ 3d8:	10 01 b2 0c 	evrnddnw r0,r1
++ 3dc:	10 01 c2 0c 	evrndwnhus r0,r1
++ 3e0:	10 01 ca 0c 	evrndwnhss r0,r1
++ 3e4:	10 01 e2 0c 	evrndhnbus r0,r1
++ 3e8:	10 01 ea 0c 	evrndhnbss r0,r1
++ 3ec:	10 01 f2 0c 	evrnddnwus r0,r1
++ 3f0:	10 01 fa 0c 	evrnddnwss r0,r1
++ 3f4:	10 01 22 0d 	evcntlzh r0,r1
++ 3f8:	10 01 22 0e 	evcntlsh r0,r1
++ 3fc:	10 01 d2 0e 	evpopcntb r0,r1
++ 400:	10 01 12 10 	circinc r0,r1,r2
++ 404:	10 01 02 1c 	evunpkhibui r0,r1
++ 408:	10 01 0a 1c 	evunpkhibsi r0,r1
++ 40c:	10 01 12 1c 	evunpkhihui r0,r1
++ 410:	10 01 1a 1c 	evunpkhihsi r0,r1
++ 414:	10 01 22 1c 	evunpklobui r0,r1
++ 418:	10 01 2a 1c 	evunpklobsi r0,r1
++ 41c:	10 01 32 1c 	evunpklohui r0,r1
++ 420:	10 01 3a 1c 	evunpklohsi r0,r1
++ 424:	10 01 42 1c 	evunpklohf r0,r1
++ 428:	10 01 4a 1c 	evunpkhihf r0,r1
++ 42c:	10 01 62 1c 	evunpklowgsf r0,r1
++ 430:	10 01 6a 1c 	evunpkhiwgsf r0,r1
++ 434:	10 01 82 1c 	evsatsduw r0,r1
++ 438:	10 01 8a 1c 	evsatsdsw r0,r1
++ 43c:	10 01 92 1c 	evsatshub r0,r1
++ 440:	10 01 9a 1c 	evsatshsb r0,r1
++ 444:	10 01 a2 1c 	evsatuwuh r0,r1
++ 448:	10 01 aa 1c 	evsatswsh r0,r1
++ 44c:	10 01 b2 1c 	evsatswuh r0,r1
++ 450:	10 01 ba 1c 	evsatuhub r0,r1
++ 454:	10 01 c2 1c 	evsatuduw r0,r1
++ 458:	10 01 ca 1c 	evsatuwsw r0,r1
++ 45c:	10 01 d2 1c 	evsatshuh r0,r1
++ 460:	10 01 da 1c 	evsatuhsh r0,r1
++ 464:	10 01 e2 1c 	evsatswuw r0,r1
++ 468:	10 01 ea 1c 	evsatswgsdf r0,r1
++ 46c:	10 01 f2 1c 	evsatsbub r0,r1
++ 470:	10 01 fa 1c 	evsatubsb r0,r1
++ 474:	10 01 02 1d 	evmaxhpuw r0,r1
++ 478:	10 01 0a 1d 	evmaxhpsw r0,r1
++ 47c:	10 01 22 1d 	evmaxbpuh r0,r1
++ 480:	10 01 2a 1d 	evmaxbpsh r0,r1
++ 484:	10 01 32 1d 	evmaxwpud r0,r1
++ 488:	10 01 3a 1d 	evmaxwpsd r0,r1
++ 48c:	10 01 42 1d 	evminhpuw r0,r1
++ 490:	10 01 4a 1d 	evminhpsw r0,r1
++ 494:	10 01 62 1d 	evminbpuh r0,r1
++ 498:	10 01 6a 1d 	evminbpsh r0,r1
++ 49c:	10 01 72 1d 	evminwpud r0,r1
++ 4a0:	10 01 7a 1d 	evminwpsd r0,r1
++ 4a4:	10 01 12 1f 	evmaxmagws r0,r1,r2
++ 4a8:	10 01 12 25 	evsl    r0,r1,r2
++ 4ac:	10 01 fa 27 	evsli   r0,r1,31
++ 4b0:	10 10 0a 29 	evsplatie r0,-16
++ 4b4:	10 10 12 29 	evsplatib r0,-16
++ 4b8:	10 10 1a 29 	evsplatibe r0,-16
++ 4bc:	10 10 22 29 	evsplatih r0,-16
++ 4c0:	10 10 2a 29 	evsplatihe r0,-16
++ 4c4:	10 10 32 29 	evsplatid r0,-16
++ 4c8:	10 10 82 29 	evsplatia r0,-16
++ 4cc:	10 10 8a 29 	evsplatiea r0,-16
++ 4d0:	10 10 92 29 	evsplatiba r0,-16
++ 4d4:	10 10 9a 29 	evsplatibea r0,-16
++ 4d8:	10 10 a2 29 	evsplatiha r0,-16
++ 4dc:	10 10 aa 29 	evsplatihea r0,-16
++ 4e0:	10 10 b2 29 	evsplatida r0,-16
++ 4e4:	10 10 0a 2b 	evsplatfio r0,-16
++ 4e8:	10 10 12 2b 	evsplatfib r0,-16
++ 4ec:	10 10 1a 2b 	evsplatfibo r0,-16
++ 4f0:	10 10 22 2b 	evsplatfih r0,-16
++ 4f4:	10 10 2a 2b 	evsplatfiho r0,-16
++ 4f8:	10 10 32 2b 	evsplatfid r0,-16
++ 4fc:	10 10 82 2b 	evsplatfia r0,-16
++ 500:	10 10 8a 2b 	evsplatfioa r0,-16
++ 504:	10 10 92 2b 	evsplatfiba r0,-16
++ 508:	10 10 9a 2b 	evsplatfiboa r0,-16
++ 50c:	10 10 a2 2b 	evsplatfiha r0,-16
++ 510:	10 10 aa 2b 	evsplatfihoa r0,-16
++ 514:	10 10 b2 2b 	evsplatfida r0,-16
++ 518:	10 21 12 30 	evcmpgtdu cr0,r1,r2
++ 51c:	10 21 12 31 	evcmpgtds cr0,r1,r2
++ 520:	10 21 12 32 	evcmpltdu cr0,r1,r2
++ 524:	10 21 12 33 	evcmpltds cr0,r1,r2
++ 528:	10 21 12 34 	evcmpeqd cr0,r1,r2
++ 52c:	10 01 12 38 	evswapbhilo r0,r1,r2
++ 530:	10 01 12 39 	evswapblohi r0,r1,r2
++ 534:	10 01 12 3a 	evswaphhilo r0,r1,r2
++ 538:	10 01 12 3b 	evswaphlohi r0,r1,r2
++ 53c:	10 01 12 3c 	evswaphe r0,r1,r2
++ 540:	10 01 12 3d 	evswaphhi r0,r1,r2
++ 544:	10 01 12 3e 	evswaphlo r0,r1,r2
++ 548:	10 01 12 3f 	evswapho r0,r1,r2
++ 54c:	10 01 fa 49 	evinsb  r0,r1,7,7
++ 550:	10 01 fa 4b 	evxtrb  r0,r1,7,7
++ 554:	10 01 62 4c 	evsplath r0,r1,3
++ 558:	10 01 f2 4c 	evsplatb r0,r1,7
++ 55c:	10 01 7a 4d 	evinsh  r0,r1,3,3
++ 560:	10 01 7a 4e 	evclrbe r0,r1,15
++ 564:	10 01 fa 4e 	evclrbo r0,r1,15
++ 568:	10 01 fa 4f 	evclrh  r0,r1,15
++ 56c:	10 01 7a 4f 	evxtrh  r0,r1,3,3
++ 570:	10 01 12 50 	evselbitm0 r0,r1,r2
++ 574:	10 01 12 51 	evselbitm1 r0,r1,r2
++ 578:	10 01 12 52 	evselbit r0,r1,r2
++ 57c:	10 01 12 54 	evperm  r0,r1,r2
++ 580:	10 01 12 55 	evperm2 r0,r1,r2
++ 584:	10 01 12 56 	evperm3 r0,r1,r2
++ 588:	10 01 12 5f 	evxtrd  r0,r1,r2,7
++ 58c:	10 01 12 60 	evsrbu  r0,r1,r2
++ 590:	10 01 12 61 	evsrbs  r0,r1,r2
++ 594:	10 01 3a 62 	evsrbiu r0,r1,7
++ 598:	10 01 3a 63 	evsrbis r0,r1,7
++ 59c:	10 01 12 64 	evslb   r0,r1,r2
++ 5a0:	10 01 12 65 	evrlb   r0,r1,r2
++ 5a4:	10 01 3a 66 	evslbi  r0,r1,7
++ 5a8:	10 01 3a 67 	evrlbi  r0,r1,7
++ 5ac:	10 01 12 68 	evsrhu  r0,r1,r2
++ 5b0:	10 01 12 69 	evsrhs  r0,r1,r2
++ 5b4:	10 01 7a 6a 	evsrhiu r0,r1,15
++ 5b8:	10 01 7a 6b 	evsrhis r0,r1,15
++ 5bc:	10 01 12 6c 	evslh   r0,r1,r2
++ 5c0:	10 01 12 6d 	evrlh   r0,r1,r2
++ 5c4:	10 01 7a 6e 	evslhi  r0,r1,15
++ 5c8:	10 01 7a 6f 	evrlhi  r0,r1,15
++ 5cc:	10 01 12 70 	evsru   r0,r1,r2
++ 5d0:	10 01 12 71 	evsrs   r0,r1,r2
++ 5d4:	10 01 fa 72 	evsriu  r0,r1,31
++ 5d8:	10 01 fa 73 	evsris  r0,r1,31
++ 5dc:	10 01 12 74 	evlvsl  r0,r1,r2
++ 5e0:	10 01 12 75 	evlvsr  r0,r1,r2
++ 5e4:	10 01 3a 77 	evsroiu r0,r1,7
++ 5e8:	10 01 7a 77 	evsrois r0,r1,7
++ 5ec:	10 01 ba 77 	evsloi  r0,r1,7
++ 5f0:	10 01 02 87 	evfssqrt r0,r1
++ 5f4:	10 04 12 91 	evfscfh r0,r2
++ 5f8:	10 04 12 95 	evfscth r0,r2
++ 5fc:	10 01 12 a0 	evfsmax r0,r1,r2
++ 600:	10 01 12 a1 	evfsmin r0,r1,r2
++ 604:	10 01 12 a2 	evfsaddsub r0,r1,r2
++ 608:	10 01 12 a3 	evfssubadd r0,r1,r2
++ 60c:	10 01 12 a4 	evfssum r0,r1,r2
++ 610:	10 01 12 a5 	evfsdiff r0,r1,r2
++ 614:	10 01 12 a6 	evfssumdiff r0,r1,r2
++ 618:	10 01 12 a7 	evfsdiffsum r0,r1,r2
++ 61c:	10 01 12 a8 	evfsaddx r0,r1,r2
++ 620:	10 01 12 a9 	evfssubx r0,r1,r2
++ 624:	10 01 12 aa 	evfsaddsubx r0,r1,r2
++ 628:	10 01 12 ab 	evfssubaddx r0,r1,r2
++ 62c:	10 01 12 ac 	evfsmulx r0,r1,r2
++ 630:	10 01 12 ae 	evfsmule r0,r1,r2
++ 634:	10 01 12 af 	evfsmulo r0,r1,r2
++ 638:	10 01 13 06 	evldbx  r0,r1,r2
++ 63c:	10 01 0b 07 	evldb   r0,8\(r1\)
++ 640:	10 01 13 0a 	evlhhsplathx r0,r1,r2
++ 644:	10 01 0b 0b 	evlhhsplath r0,2\(r1\)
++ 648:	10 01 13 12 	evlwbsplatwx r0,r1,r2
++ 64c:	10 01 0b 13 	evlwbsplatw r0,4\(r1\)
++ 650:	10 01 13 1a 	evlwhsplatwx r0,r1,r2
++ 654:	10 01 0b 1b 	evlwhsplatw r0,4\(r1\)
++ 658:	10 01 13 1e 	evlbbsplatbx r0,r1,r2
++ 65c:	10 01 0b 1f 	evlbbsplatb r0,1\(r1\)
++ 660:	10 01 13 26 	evstdbx r0,r1,r2
++ 664:	10 01 0b 27 	evstdb  r0,8\(r1\)
++ 668:	10 01 13 2a 	evlwbex r0,r1,r2
++ 66c:	10 01 0b 2b 	evlwbe  r0,4\(r1\)
++ 670:	10 01 13 2c 	evlwboux r0,r1,r2
++ 674:	10 01 0b 2d 	evlwbou r0,4\(r1\)
++ 678:	10 01 13 2e 	evlwbosx r0,r1,r2
++ 67c:	10 01 0b 2f 	evlwbos r0,4\(r1\)
++ 680:	10 01 13 32 	evstwbex r0,r1,r2
++ 684:	10 01 0b 33 	evstwbe r0,4\(r1\)
++ 688:	10 01 13 36 	evstwbox r0,r1,r2
++ 68c:	10 01 0b 37 	evstwbo r0,4\(r1\)
++ 690:	10 01 13 3a 	evstwbx r0,r1,r2
++ 694:	10 01 0b 3b 	evstwb  r0,4\(r1\)
++ 698:	10 01 13 3e 	evsthbx r0,r1,r2
++ 69c:	10 01 0b 3f 	evsthb  r0,2\(r1\)
++ 6a0:	10 01 13 40 	evlddmx r0,r1,r2
++ 6a4:	10 01 0b 41 	evlddu  r0,8\(r1\)
++ 6a8:	10 01 13 42 	evldwmx r0,r1,r2
++ 6ac:	10 01 0b 43 	evldwu  r0,8\(r1\)
++ 6b0:	10 01 13 44 	evldhmx r0,r1,r2
++ 6b4:	10 01 0b 45 	evldhu  r0,8\(r1\)
++ 6b8:	10 01 13 46 	evldbmx r0,r1,r2
++ 6bc:	10 01 0b 47 	evldbu  r0,8\(r1\)
++ 6c0:	10 01 13 48 	evlhhesplatmx r0,r1,r2
++ 6c4:	10 01 0b 49 	evlhhesplatu r0,2\(r1\)
++ 6c8:	10 01 13 4a 	evlhhsplathmx r0,r1,r2
++ 6cc:	10 01 0b 4b 	evlhhsplathu r0,2\(r1\)
++ 6d0:	10 01 13 4c 	evlhhousplatmx r0,r1,r2
++ 6d4:	10 01 0b 4d 	evlhhousplatu r0,2\(r1\)
++ 6d8:	10 01 13 4e 	evlhhossplatmx r0,r1,r2
++ 6dc:	10 01 0b 4f 	evlhhossplatu r0,2\(r1\)
++ 6e0:	10 01 13 50 	evlwhemx r0,r1,r2
++ 6e4:	10 01 0b 51 	evlwheu r0,4\(r1\)
++ 6e8:	10 01 13 52 	evlwbsplatwmx r0,r1,r2
++ 6ec:	10 01 0b 53 	evlwbsplatwu r0,4\(r1\)
++ 6f0:	10 01 13 54 	evlwhoumx r0,r1,r2
++ 6f4:	10 01 0b 55 	evlwhouu r0,4\(r1\)
++ 6f8:	10 01 13 56 	evlwhosmx r0,r1,r2
++ 6fc:	10 01 0b 57 	evlwhosu r0,4\(r1\)
++ 700:	10 01 13 58 	evlwwsplatmx r0,r1,r2
++ 704:	10 01 0b 59 	evlwwsplatu r0,4\(r1\)
++ 708:	10 01 13 5a 	evlwhsplatwmx r0,r1,r2
++ 70c:	10 01 0b 5b 	evlwhsplatwu r0,4\(r1\)
++ 710:	10 01 13 5c 	evlwhsplatmx r0,r1,r2
++ 714:	10 01 0b 5d 	evlwhsplatu r0,4\(r1\)
++ 718:	10 01 13 5e 	evlbbsplatbmx r0,r1,r2
++ 71c:	10 01 0b 5f 	evlbbsplatbu r0,1\(r1\)
++ 720:	10 01 13 60 	evstddmx r0,r1,r2
++ 724:	10 01 0b 61 	evstddu r0,8\(r1\)
++ 728:	10 01 13 62 	evstdwmx r0,r1,r2
++ 72c:	10 01 0b 63 	evstdwu r0,8\(r1\)
++ 730:	10 01 13 64 	evstdhmx r0,r1,r2
++ 734:	10 01 0b 65 	evstdhu r0,8\(r1\)
++ 738:	10 01 13 66 	evstdbmx r0,r1,r2
++ 73c:	10 01 0b 67 	evstdbu r0,8\(r1\)
++ 740:	10 01 13 6a 	evlwbemx r0,r1,r2
++ 744:	10 01 0b 6b 	evlwbeu r0,4\(r1\)
++ 748:	10 01 13 6c 	evlwboumx r0,r1,r2
++ 74c:	10 01 0b 6d 	evlwbouu r0,4\(r1\)
++ 750:	10 01 13 6e 	evlwbosmx r0,r1,r2
++ 754:	10 01 0b 6f 	evlwbosu r0,4\(r1\)
++ 758:	10 01 13 70 	evstwhemx r0,r1,r2
++ 75c:	10 01 0b 71 	evstwheu r0,4\(r1\)
++ 760:	10 01 13 72 	evstwbemx r0,r1,r2
++ 764:	10 01 0b 73 	evstwbeu r0,4\(r1\)
++ 768:	10 01 13 74 	evstwhomx r0,r1,r2
++ 76c:	10 01 0b 75 	evstwhou r0,4\(r1\)
++ 770:	10 01 13 76 	evstwbomx r0,r1,r2
++ 774:	10 01 0b 77 	evstwbou r0,4\(r1\)
++ 778:	10 01 13 78 	evstwwemx r0,r1,r2
++ 77c:	10 01 0b 79 	evstwweu r0,4\(r1\)
++ 780:	10 01 13 7a 	evstwbmx r0,r1,r2
++ 784:	10 01 0b 7b 	evstwbu r0,4\(r1\)
++ 788:	10 01 13 7c 	evstwwomx r0,r1,r2
++ 78c:	10 01 0b 7d 	evstwwou r0,4\(r1\)
++ 790:	10 01 13 7e 	evsthbmx r0,r1,r2
++ 794:	10 01 0b 7f 	evsthbu r0,2\(r1\)
++ 798:	10 01 14 00 	evmhusi r0,r1,r2
++ 79c:	10 01 14 01 	evmhssi r0,r1,r2
++ 7a0:	10 01 14 02 	evmhsusi r0,r1,r2
++ 7a4:	10 01 14 04 	evmhssf r0,r1,r2
++ 7a8:	10 01 14 05 	evmhumi r0,r1,r2
++ 7ac:	10 01 14 06 	evmhssfr r0,r1,r2
++ 7b0:	10 01 14 0a 	evmhesumi r0,r1,r2
++ 7b4:	10 01 14 0e 	evmhosumi r0,r1,r2
++ 7b8:	10 01 14 18 	evmbeumi r0,r1,r2
++ 7bc:	10 01 14 19 	evmbesmi r0,r1,r2
++ 7c0:	10 01 14 1a 	evmbesumi r0,r1,r2
++ 7c4:	10 01 14 1c 	evmboumi r0,r1,r2
++ 7c8:	10 01 14 1d 	evmbosmi r0,r1,r2
++ 7cc:	10 01 14 1e 	evmbosumi r0,r1,r2
++ 7d0:	10 01 14 2a 	evmhesumia r0,r1,r2
++ 7d4:	10 01 14 2e 	evmhosumia r0,r1,r2
++ 7d8:	10 01 14 38 	evmbeumia r0,r1,r2
++ 7dc:	10 01 14 39 	evmbesmia r0,r1,r2
++ 7e0:	10 01 14 3a 	evmbesumia r0,r1,r2
++ 7e4:	10 01 14 3c 	evmboumia r0,r1,r2
++ 7e8:	10 01 14 3d 	evmbosmia r0,r1,r2
++ 7ec:	10 01 14 3e 	evmbosumia r0,r1,r2
++ 7f0:	10 01 14 40 	evmwusiw r0,r1,r2
++ 7f4:	10 01 14 41 	evmwssiw r0,r1,r2
++ 7f8:	10 01 14 46 	evmwhssfr r0,r1,r2
++ 7fc:	10 01 14 56 	evmwehgsmfr r0,r1,r2
++ 800:	10 01 14 57 	evmwehgsmf r0,r1,r2
++ 804:	10 01 14 5e 	evmwohgsmfr r0,r1,r2
++ 808:	10 01 14 5f 	evmwohgsmf r0,r1,r2
++ 80c:	10 01 14 66 	evmwhssfra r0,r1,r2
++ 810:	10 01 14 76 	evmwehgsmfra r0,r1,r2
++ 814:	10 01 14 77 	evmwehgsmfa r0,r1,r2
++ 818:	10 01 14 7e 	evmwohgsmfra r0,r1,r2
++ 81c:	10 01 14 7f 	evmwohgsmfa r0,r1,r2
++ 820:	10 01 04 80 	evaddusiaa r0,r1
++ 824:	10 01 04 81 	evaddssiaa r0,r1
++ 828:	10 01 04 82 	evsubfusiaa r0,r1
++ 82c:	10 01 04 83 	evsubfssiaa r0,r1
++ 830:	10 01 04 84 	evaddsmiaa r0,r1
++ 834:	10 01 04 86 	evsubfsmiaa r0,r1
++ 838:	10 01 14 88 	evaddh  r0,r1,r2
++ 83c:	10 01 14 89 	evaddhss r0,r1,r2
++ 840:	10 01 14 8a 	evsubfh r0,r1,r2
++ 844:	10 01 14 8b 	evsubfhss r0,r1,r2
++ 848:	10 01 14 8c 	evaddhx r0,r1,r2
++ 84c:	10 01 14 8d 	evaddhxss r0,r1,r2
++ 850:	10 01 14 8e 	evsubfhx r0,r1,r2
++ 854:	10 01 14 8f 	evsubfhxss r0,r1,r2
++ 858:	10 01 14 90 	evaddd  r0,r1,r2
++ 85c:	10 01 14 91 	evadddss r0,r1,r2
++ 860:	10 01 14 92 	evsubfd r0,r1,r2
++ 864:	10 01 14 93 	evsubfdss r0,r1,r2
++ 868:	10 01 14 94 	evaddb  r0,r1,r2
++ 86c:	10 01 14 95 	evaddbss r0,r1,r2
++ 870:	10 01 14 96 	evsubfb r0,r1,r2
++ 874:	10 01 14 97 	evsubfbss r0,r1,r2
++ 878:	10 01 14 98 	evaddsubfh r0,r1,r2
++ 87c:	10 01 14 99 	evaddsubfhss r0,r1,r2
++ 880:	10 01 14 9a 	evsubfaddh r0,r1,r2
++ 884:	10 01 14 9b 	evsubfaddhss r0,r1,r2
++ 888:	10 01 14 9c 	evaddsubfhx r0,r1,r2
++ 88c:	10 01 14 9d 	evaddsubfhxss r0,r1,r2
++ 890:	10 01 14 9e 	evsubfaddhx r0,r1,r2
++ 894:	10 01 14 9f 	evsubfaddhxss r0,r1,r2
++ 898:	10 01 14 a0 	evadddus r0,r1,r2
++ 89c:	10 01 14 a1 	evaddbus r0,r1,r2
++ 8a0:	10 01 14 a2 	evsubfdus r0,r1,r2
++ 8a4:	10 01 14 a3 	evsubfbus r0,r1,r2
++ 8a8:	10 01 14 a4 	evaddwus r0,r1,r2
++ 8ac:	10 01 14 a5 	evaddwxus r0,r1,r2
++ 8b0:	10 01 14 a6 	evsubfwus r0,r1,r2
++ 8b4:	10 01 14 a7 	evsubfwxus r0,r1,r2
++ 8b8:	10 01 14 a8 	evadd2subf2h r0,r1,r2
++ 8bc:	10 01 14 a9 	evadd2subf2hss r0,r1,r2
++ 8c0:	10 01 14 aa 	evsubf2add2h r0,r1,r2
++ 8c4:	10 01 14 ab 	evsubf2add2hss r0,r1,r2
++ 8c8:	10 01 14 ac 	evaddhus r0,r1,r2
++ 8cc:	10 01 14 ad 	evaddhxus r0,r1,r2
++ 8d0:	10 01 14 ae 	evsubfhus r0,r1,r2
++ 8d4:	10 01 14 af 	evsubfhxus r0,r1,r2
++ 8d8:	10 01 14 b1 	evaddwss r0,r1,r2
++ 8dc:	10 01 14 b3 	evsubfwss r0,r1,r2
++ 8e0:	10 01 14 b4 	evaddwx r0,r1,r2
++ 8e4:	10 01 14 b5 	evaddwxss r0,r1,r2
++ 8e8:	10 01 14 b6 	evsubfwx r0,r1,r2
++ 8ec:	10 01 14 b7 	evsubfwxss r0,r1,r2
++ 8f0:	10 01 14 b8 	evaddsubfw r0,r1,r2
++ 8f4:	10 01 14 b9 	evaddsubfwss r0,r1,r2
++ 8f8:	10 01 14 ba 	evsubfaddw r0,r1,r2
++ 8fc:	10 01 14 bb 	evsubfaddwss r0,r1,r2
++ 900:	10 01 14 bc 	evaddsubfwx r0,r1,r2
++ 904:	10 01 14 bd 	evaddsubfwxss r0,r1,r2
++ 908:	10 01 14 be 	evsubfaddwx r0,r1,r2
++ 90c:	10 01 14 bf 	evsubfaddwxss r0,r1,r2
++ 910:	10 00 0c c4 	evmar   r0
++ 914:	10 01 04 c5 	evsumwu r0,r1
++ 918:	10 01 0c c5 	evsumws r0,r1
++ 91c:	10 01 14 c5 	evsum4bu r0,r1
++ 920:	10 01 1c c5 	evsum4bs r0,r1
++ 924:	10 01 24 c5 	evsum2hu r0,r1
++ 928:	10 01 2c c5 	evsum2hs r0,r1
++ 92c:	10 01 34 c5 	evdiff2his r0,r1
++ 930:	10 01 3c c5 	evsum2his r0,r1
++ 934:	10 01 84 c5 	evsumwua r0,r1
++ 938:	10 01 8c c5 	evsumwsa r0,r1
++ 93c:	10 01 94 c5 	evsum4bua r0,r1
++ 940:	10 01 9c c5 	evsum4bsa r0,r1
++ 944:	10 01 a4 c5 	evsum2hua r0,r1
++ 948:	10 01 ac c5 	evsum2hsa r0,r1
++ 94c:	10 01 b4 c5 	evdiff2hisa r0,r1
++ 950:	10 01 bc c5 	evsum2hisa r0,r1
++ 954:	10 01 c4 c5 	evsumwuaa r0,r1
++ 958:	10 01 cc c5 	evsumwsaa r0,r1
++ 95c:	10 01 d4 c5 	evsum4buaaw r0,r1
++ 960:	10 01 dc c5 	evsum4bsaaw r0,r1
++ 964:	10 01 e4 c5 	evsum2huaaw r0,r1
++ 968:	10 01 ec c5 	evsum2hsaaw r0,r1
++ 96c:	10 01 f4 c5 	evdiff2hisaaw r0,r1
++ 970:	10 01 fc c5 	evsum2hisaaw r0,r1
++ 974:	10 01 14 cc 	evdivwsf r0,r1,r2
++ 978:	10 01 14 cd 	evdivwuf r0,r1,r2
++ 97c:	10 01 14 ce 	evdivs  r0,r1,r2
++ 980:	10 01 14 cf 	evdivu  r0,r1,r2
++ 984:	10 01 14 d0 	evaddwegsi r0,r1,r2
++ 988:	10 01 14 d1 	evaddwegsf r0,r1,r2
++ 98c:	10 01 14 d2 	evsubfwegsi r0,r1,r2
++ 990:	10 01 14 d3 	evsubfwegsf r0,r1,r2
++ 994:	10 01 14 d4 	evaddwogsi r0,r1,r2
++ 998:	10 01 14 d5 	evaddwogsf r0,r1,r2
++ 99c:	10 01 14 d6 	evsubfwogsi r0,r1,r2
++ 9a0:	10 01 14 d7 	evsubfwogsf r0,r1,r2
++ 9a4:	10 01 14 d8 	evaddhhiuw r0,r1,r2
++ 9a8:	10 01 14 d9 	evaddhhisw r0,r1,r2
++ 9ac:	10 01 14 da 	evsubfhhiuw r0,r1,r2
++ 9b0:	10 01 14 db 	evsubfhhisw r0,r1,r2
++ 9b4:	10 01 14 dc 	evaddhlouw r0,r1,r2
++ 9b8:	10 01 14 dd 	evaddhlosw r0,r1,r2
++ 9bc:	10 01 14 de 	evsubfhlouw r0,r1,r2
++ 9c0:	10 01 14 df 	evsubfhlosw r0,r1,r2
++ 9c4:	10 01 15 02 	evmhesusiaaw r0,r1,r2
++ 9c8:	10 01 15 06 	evmhosusiaaw r0,r1,r2
++ 9cc:	10 01 15 0a 	evmhesumiaaw r0,r1,r2
++ 9d0:	10 01 15 0e 	evmhosumiaaw r0,r1,r2
++ 9d4:	10 01 15 10 	evmbeusiaah r0,r1,r2
++ 9d8:	10 01 15 11 	evmbessiaah r0,r1,r2
++ 9dc:	10 01 15 12 	evmbesusiaah r0,r1,r2
++ 9e0:	10 01 15 14 	evmbousiaah r0,r1,r2
++ 9e4:	10 01 15 15 	evmbossiaah r0,r1,r2
++ 9e8:	10 01 15 16 	evmbosusiaah r0,r1,r2
++ 9ec:	10 01 15 18 	evmbeumiaah r0,r1,r2
++ 9f0:	10 01 15 19 	evmbesmiaah r0,r1,r2
++ 9f4:	10 01 15 1a 	evmbesumiaah r0,r1,r2
++ 9f8:	10 01 15 1c 	evmboumiaah r0,r1,r2
++ 9fc:	10 01 15 1d 	evmbosmiaah r0,r1,r2
++ a00:	10 01 15 1e 	evmbosumiaah r0,r1,r2
++ a04:	10 01 15 42 	evmwlusiaaw3 r0,r1,r2
++ a08:	10 01 15 43 	evmwlssiaaw3 r0,r1,r2
++ a0c:	10 01 15 44 	evmwhssfraaw3 r0,r1,r2
++ a10:	10 01 15 45 	evmwhssfaaw3 r0,r1,r2
++ a14:	10 01 15 46 	evmwhssfraaw r0,r1,r2
++ a18:	10 01 15 47 	evmwhssfaaw r0,r1,r2
++ a1c:	10 01 15 4a 	evmwlumiaaw3 r0,r1,r2
++ a20:	10 01 15 4b 	evmwlsmiaaw3 r0,r1,r2
++ a24:	10 01 15 50 	evmwusiaa r0,r1,r2
++ a28:	10 01 15 51 	evmwssiaa r0,r1,r2
++ a2c:	10 01 15 56 	evmwehgsmfraa r0,r1,r2
++ a30:	10 01 15 57 	evmwehgsmfaa r0,r1,r2
++ a34:	10 01 15 5e 	evmwohgsmfraa r0,r1,r2
++ a38:	10 01 15 5f 	evmwohgsmfaa r0,r1,r2
++ a3c:	10 01 15 82 	evmhesusianw r0,r1,r2
++ a40:	10 01 15 86 	evmhosusianw r0,r1,r2
++ a44:	10 01 15 8a 	evmhesumianw r0,r1,r2
++ a48:	10 01 15 8e 	evmhosumianw r0,r1,r2
++ a4c:	10 01 15 90 	evmbeusianh r0,r1,r2
++ a50:	10 01 15 91 	evmbessianh r0,r1,r2
++ a54:	10 01 15 92 	evmbesusianh r0,r1,r2
++ a58:	10 01 15 94 	evmbousianh r0,r1,r2
++ a5c:	10 01 15 95 	evmbossianh r0,r1,r2
++ a60:	10 01 15 96 	evmbosusianh r0,r1,r2
++ a64:	10 01 15 98 	evmbeumianh r0,r1,r2
++ a68:	10 01 15 99 	evmbesmianh r0,r1,r2
++ a6c:	10 01 15 9a 	evmbesumianh r0,r1,r2
++ a70:	10 01 15 9c 	evmboumianh r0,r1,r2
++ a74:	10 01 15 9d 	evmbosmianh r0,r1,r2
++ a78:	10 01 15 9e 	evmbosumianh r0,r1,r2
++ a7c:	10 01 15 c2 	evmwlusianw3 r0,r1,r2
++ a80:	10 01 15 c3 	evmwlssianw3 r0,r1,r2
++ a84:	10 01 15 c4 	evmwhssfranw3 r0,r1,r2
++ a88:	10 01 15 c5 	evmwhssfanw3 r0,r1,r2
++ a8c:	10 01 15 c6 	evmwhssfranw r0,r1,r2
++ a90:	10 01 15 c7 	evmwhssfanw r0,r1,r2
++ a94:	10 01 15 ca 	evmwlumianw3 r0,r1,r2
++ a98:	10 01 15 cb 	evmwlsmianw3 r0,r1,r2
++ a9c:	10 01 15 d0 	evmwusian r0,r1,r2
++ aa0:	10 01 15 d1 	evmwssian r0,r1,r2
++ aa4:	10 01 15 d6 	evmwehgsmfran r0,r1,r2
++ aa8:	10 01 15 d7 	evmwehgsmfan r0,r1,r2
++ aac:	10 01 15 de 	evmwohgsmfran r0,r1,r2
++ ab0:	10 01 15 df 	evmwohgsmfan r0,r1,r2
++ ab4:	10 01 16 00 	evseteqb r0,r1,r2
++ ab8:	10 01 16 01 	evseteqb. r0,r1,r2
++ abc:	10 01 16 02 	evseteqh r0,r1,r2
++ ac0:	10 01 16 03 	evseteqh. r0,r1,r2
++ ac4:	10 01 16 04 	evseteqw r0,r1,r2
++ ac8:	10 01 16 05 	evseteqw. r0,r1,r2
++ acc:	10 01 16 08 	evsetgthu r0,r1,r2
++ ad0:	10 01 16 09 	evsetgthu. r0,r1,r2
++ ad4:	10 01 16 0a 	evsetgths r0,r1,r2
++ ad8:	10 01 16 0b 	evsetgths. r0,r1,r2
++ adc:	10 01 16 0c 	evsetgtwu r0,r1,r2
++ ae0:	10 01 16 0d 	evsetgtwu. r0,r1,r2
++ ae4:	10 01 16 0e 	evsetgtws r0,r1,r2
++ ae8:	10 01 16 0f 	evsetgtws. r0,r1,r2
++ aec:	10 01 16 10 	evsetgtbu r0,r1,r2
++ af0:	10 01 16 11 	evsetgtbu. r0,r1,r2
++ af4:	10 01 16 12 	evsetgtbs r0,r1,r2
++ af8:	10 01 16 13 	evsetgtbs. r0,r1,r2
++ afc:	10 01 16 14 	evsetltbu r0,r1,r2
++ b00:	10 01 16 15 	evsetltbu. r0,r1,r2
++ b04:	10 01 16 16 	evsetltbs r0,r1,r2
++ b08:	10 01 16 17 	evsetltbs. r0,r1,r2
++ b0c:	10 01 16 18 	evsetlthu r0,r1,r2
++ b10:	10 01 16 19 	evsetlthu. r0,r1,r2
++ b14:	10 01 16 1a 	evsetlths r0,r1,r2
++ b18:	10 01 16 1b 	evsetlths. r0,r1,r2
++ b1c:	10 01 16 1c 	evsetltwu r0,r1,r2
++ b20:	10 01 16 1d 	evsetltwu. r0,r1,r2
++ b24:	10 01 16 1e 	evsetltws r0,r1,r2
++ b28:	10 01 16 1f 	evsetltws. r0,r1,r2
++ b2c:	10 01 16 20 	evsaduw r0,r1,r2
++ b30:	10 01 16 21 	evsadsw r0,r1,r2
++ b34:	10 01 16 22 	evsad4ub r0,r1,r2
++ b38:	10 01 16 23 	evsad4sb r0,r1,r2
++ b3c:	10 01 16 24 	evsad2uh r0,r1,r2
++ b40:	10 01 16 25 	evsad2sh r0,r1,r2
++ b44:	10 01 16 28 	evsaduwa r0,r1,r2
++ b48:	10 01 16 29 	evsadswa r0,r1,r2
++ b4c:	10 01 16 2a 	evsad4uba r0,r1,r2
++ b50:	10 01 16 2b 	evsad4sba r0,r1,r2
++ b54:	10 01 16 2c 	evsad2uha r0,r1,r2
++ b58:	10 01 16 2d 	evsad2sha r0,r1,r2
++ b5c:	10 01 16 30 	evabsdifuw r0,r1,r2
++ b60:	10 01 16 31 	evabsdifsw r0,r1,r2
++ b64:	10 01 16 32 	evabsdifub r0,r1,r2
++ b68:	10 01 16 33 	evabsdifsb r0,r1,r2
++ b6c:	10 01 16 34 	evabsdifuh r0,r1,r2
++ b70:	10 01 16 35 	evabsdifsh r0,r1,r2
++ b74:	10 01 16 38 	evsaduwaa r0,r1,r2
++ b78:	10 01 16 39 	evsadswaa r0,r1,r2
++ b7c:	10 01 16 3a 	evsad4ubaaw r0,r1,r2
++ b80:	10 01 16 3b 	evsad4sbaaw r0,r1,r2
++ b84:	10 01 16 3c 	evsad2uhaaw r0,r1,r2
++ b88:	10 01 16 3d 	evsad2shaaw r0,r1,r2
++ b8c:	10 01 16 40 	evpkshubs r0,r1,r2
++ b90:	10 01 16 41 	evpkshsbs r0,r1,r2
++ b94:	10 01 16 42 	evpkswuhs r0,r1,r2
++ b98:	10 01 16 43 	evpkswshs r0,r1,r2
++ b9c:	10 01 16 44 	evpkuhubs r0,r1,r2
++ ba0:	10 01 16 45 	evpkuwuhs r0,r1,r2
++ ba4:	10 01 16 46 	evpkswshilvs r0,r1,r2
++ ba8:	10 01 16 47 	evpkswgshefrs r0,r1,r2
++ bac:	10 01 16 48 	evpkswshfrs r0,r1,r2
++ bb0:	10 01 16 49 	evpkswshilvfrs r0,r1,r2
++ bb4:	10 01 16 4a 	evpksdswfrs r0,r1,r2
++ bb8:	10 01 16 4b 	evpksdshefrs r0,r1,r2
++ bbc:	10 01 16 4c 	evpkuduws r0,r1,r2
++ bc0:	10 01 16 4d 	evpksdsws r0,r1,r2
++ bc4:	10 01 16 4e 	evpkswgswfrs r0,r1,r2
++ bc8:	10 01 16 50 	evilveh r0,r1,r2
++ bcc:	10 01 16 51 	evilveoh r0,r1,r2
++ bd0:	10 01 16 52 	evilvhih r0,r1,r2
++ bd4:	10 01 16 53 	evilvhiloh r0,r1,r2
++ bd8:	10 01 16 54 	evilvloh r0,r1,r2
++ bdc:	10 01 16 55 	evilvlohih r0,r1,r2
++ be0:	10 01 16 56 	evilvoeh r0,r1,r2
++ be4:	10 01 16 57 	evilvoh r0,r1,r2
++ be8:	10 01 16 58 	evdlveb r0,r1,r2
++ bec:	10 01 16 59 	evdlveh r0,r1,r2
++ bf0:	10 01 16 5a 	evdlveob r0,r1,r2
++ bf4:	10 01 16 5b 	evdlveoh r0,r1,r2
++ bf8:	10 01 16 5c 	evdlvob r0,r1,r2
++ bfc:	10 01 16 5d 	evdlvoh r0,r1,r2
++ c00:	10 01 16 5e 	evdlvoeb r0,r1,r2
++ c04:	10 01 16 5f 	evdlvoeh r0,r1,r2
++ c08:	10 01 16 60 	evmaxbu r0,r1,r2
++ c0c:	10 01 16 61 	evmaxbs r0,r1,r2
++ c10:	10 01 16 62 	evmaxhu r0,r1,r2
++ c14:	10 01 16 63 	evmaxhs r0,r1,r2
++ c18:	10 01 16 64 	evmaxwu r0,r1,r2
++ c1c:	10 01 16 65 	evmaxws r0,r1,r2
++ c20:	10 01 16 66 	evmaxdu r0,r1,r2
++ c24:	10 01 16 67 	evmaxds r0,r1,r2
++ c28:	10 01 16 68 	evminbu r0,r1,r2
++ c2c:	10 01 16 69 	evminbs r0,r1,r2
++ c30:	10 01 16 6a 	evminhu r0,r1,r2
++ c34:	10 01 16 6b 	evminhs r0,r1,r2
++ c38:	10 01 16 6c 	evminwu r0,r1,r2
++ c3c:	10 01 16 6d 	evminws r0,r1,r2
++ c40:	10 01 16 6e 	evmindu r0,r1,r2
++ c44:	10 01 16 6f 	evminds r0,r1,r2
++ c48:	10 01 16 70 	evavgwu r0,r1,r2
++ c4c:	10 01 16 71 	evavgws r0,r1,r2
++ c50:	10 01 16 72 	evavgbu r0,r1,r2
++ c54:	10 01 16 73 	evavgbs r0,r1,r2
++ c58:	10 01 16 74 	evavghu r0,r1,r2
++ c5c:	10 01 16 75 	evavghs r0,r1,r2
++ c60:	10 01 16 76 	evavgdu r0,r1,r2
++ c64:	10 01 16 77 	evavgds r0,r1,r2
++ c68:	10 01 16 78 	evavgwur r0,r1,r2
++ c6c:	10 01 16 79 	evavgwsr r0,r1,r2
++ c70:	10 01 16 7a 	evavgbur r0,r1,r2
++ c74:	10 01 16 7b 	evavgbsr r0,r1,r2
++ c78:	10 01 16 7c 	evavghur r0,r1,r2
++ c7c:	10 01 16 7d 	evavghsr r0,r1,r2
++ c80:	10 01 16 7e 	evavgdur r0,r1,r2
++ c84:	10 01 16 7f 	evavgdsr r0,r1,r2
++ c88:	10 01 11 4d 	evdotphssmi r0,r1,r2
++ c8c:	10 01 11 6d 	evdotphssmia r0,r1,r2
++ c90:	10 01 11 cd 	evdotpwssmi r0,r1,r2
++ c94:	10 01 11 ed 	evdotpwssmia r0,r1,r2
+diff --git a/gas/testsuite/gas/ppc/spe2.s b/gas/testsuite/gas/ppc/spe2.s
+new file mode 100644
+index 0000000..a48b2bd
+--- /dev/null
++++ b/gas/testsuite/gas/ppc/spe2.s
+@@ -0,0 +1,838 @@
++# PA SPE2 instructions
++# Testcase for CMPE200GCC-5, CMPE200GCC-62
++
++	.section ".text"
++
++	.equ	rA,1
++	.equ	rB,2
++	.equ	rD,0
++	.equ	rS,0
++	.equ	UIMM, 31
++	.equ	UIMM_LT8, 7
++	.equ	UIMM_LT16, 15
++	.equ	UIMM_1, 1
++	.equ	UIMM_2, 2
++	.equ	UIMM_4, 4
++	.equ	UIMM_8, 8
++	.equ	SIMM, -16
++	.equ	crD,    0
++	.equ	nnn,    7
++	.equ	bbb,    7
++	.equ	dd,     3
++	.equ	Ddd,    7
++	.equ	hh,     3
++	.equ	mask,  15
++	.equ	offset, 7
++
++	evdotpwcssi           rD, rA, rB
++	evdotpwcsmi           rD, rA, rB
++	evdotpwcssfr          rD, rA, rB
++	evdotpwcssf           rD, rA, rB
++	evdotpwgasmf          rD, rA, rB
++	evdotpwxgasmf         rD, rA, rB
++	evdotpwgasmfr         rD, rA, rB
++	evdotpwxgasmfr        rD, rA, rB
++	evdotpwgssmf          rD, rA, rB
++	evdotpwxgssmf         rD, rA, rB
++	evdotpwgssmfr         rD, rA, rB
++	evdotpwxgssmfr        rD, rA, rB
++	evdotpwcssiaaw3       rD, rA, rB
++	evdotpwcsmiaaw3       rD, rA, rB
++	evdotpwcssfraaw3      rD, rA, rB
++	evdotpwcssfaaw3       rD, rA, rB
++	evdotpwgasmfaa3       rD, rA, rB
++	evdotpwxgasmfaa3      rD, rA, rB
++	evdotpwgasmfraa3      rD, rA, rB
++	evdotpwxgasmfraa3     rD, rA, rB
++	evdotpwgssmfaa3       rD, rA, rB
++	evdotpwxgssmfaa3      rD, rA, rB
++	evdotpwgssmfraa3      rD, rA, rB
++	evdotpwxgssmfraa3     rD, rA, rB
++	evdotpwcssia          rD, rA, rB
++	evdotpwcsmia          rD, rA, rB
++	evdotpwcssfra         rD, rA, rB
++	evdotpwcssfa          rD, rA, rB
++	evdotpwgasmfa         rD, rA, rB
++	evdotpwxgasmfa        rD, rA, rB
++	evdotpwgasmfra        rD, rA, rB
++	evdotpwxgasmfra       rD, rA, rB
++	evdotpwgssmfa         rD, rA, rB
++	evdotpwxgssmfa        rD, rA, rB
++	evdotpwgssmfra        rD, rA, rB
++	evdotpwxgssmfra       rD, rA, rB
++	evdotpwcssiaaw        rD, rA, rB
++	evdotpwcsmiaaw        rD, rA, rB
++	evdotpwcssfraaw       rD, rA, rB
++	evdotpwcssfaaw        rD, rA, rB
++	evdotpwgasmfaa        rD, rA, rB
++	evdotpwxgasmfaa       rD, rA, rB
++	evdotpwgasmfraa       rD, rA, rB
++	evdotpwxgasmfraa      rD, rA, rB
++	evdotpwgssmfaa        rD, rA, rB
++	evdotpwxgssmfaa       rD, rA, rB
++	evdotpwgssmfraa       rD, rA, rB
++	evdotpwxgssmfraa      rD, rA, rB
++	evdotphihcssi         rD, rA, rB
++	evdotplohcssi         rD, rA, rB
++	evdotphihcssf         rD, rA, rB
++	evdotplohcssf         rD, rA, rB
++	evdotphihcsmi         rD, rA, rB
++	evdotplohcsmi         rD, rA, rB
++	evdotphihcssfr        rD, rA, rB
++	evdotplohcssfr        rD, rA, rB
++	evdotphihcssiaaw3     rD, rA, rB
++	evdotplohcssiaaw3     rD, rA, rB
++	evdotphihcssfaaw3     rD, rA, rB
++	evdotplohcssfaaw3     rD, rA, rB
++	evdotphihcsmiaaw3     rD, rA, rB
++	evdotplohcsmiaaw3     rD, rA, rB
++	evdotphihcssfraaw3    rD, rA, rB
++	evdotplohcssfraaw3    rD, rA, rB
++	evdotphihcssia        rD, rA, rB
++	evdotplohcssia        rD, rA, rB
++	evdotphihcssfa        rD, rA, rB
++	evdotplohcssfa        rD, rA, rB
++	evdotphihcsmia        rD, rA, rB
++	evdotplohcsmia        rD, rA, rB
++	evdotphihcssfra       rD, rA, rB
++	evdotplohcssfra       rD, rA, rB
++	evdotphihcssiaaw      rD, rA, rB
++	evdotplohcssiaaw      rD, rA, rB
++	evdotphihcssfaaw      rD, rA, rB
++	evdotplohcssfaaw      rD, rA, rB
++	evdotphihcsmiaaw      rD, rA, rB
++	evdotplohcsmiaaw      rD, rA, rB
++	evdotphihcssfraaw     rD, rA, rB
++	evdotplohcssfraaw     rD, rA, rB
++	evdotphausi           rD, rA, rB
++	evdotphassi           rD, rA, rB
++	evdotphasusi          rD, rA, rB
++	evdotphassf           rD, rA, rB
++	evdotphsssf           rD, rA, rB
++	evdotphaumi           rD, rA, rB
++	evdotphasmi           rD, rA, rB
++	evdotphasumi          rD, rA, rB
++	evdotphassfr          rD, rA, rB
++	evdotphssmi           rD, rA, rB
++	evdotphsssfr          rD, rA, rB
++	evdotphausiaaw3       rD, rA, rB
++	evdotphassiaaw3       rD, rA, rB
++	evdotphasusiaaw3      rD, rA, rB
++	evdotphassfaaw3       rD, rA, rB
++	evdotphsssiaaw3       rD, rA, rB
++	evdotphsssfaaw3       rD, rA, rB
++	evdotphaumiaaw3       rD, rA, rB
++	evdotphasmiaaw3       rD, rA, rB
++	evdotphasumiaaw3      rD, rA, rB
++	evdotphassfraaw3      rD, rA, rB
++	evdotphssmiaaw3       rD, rA, rB
++	evdotphsssfraaw3      rD, rA, rB
++	evdotphausia          rD, rA, rB
++	evdotphassia          rD, rA, rB
++	evdotphasusia         rD, rA, rB
++	evdotphassfa          rD, rA, rB
++	evdotphsssfa          rD, rA, rB
++	evdotphaumia          rD, rA, rB
++	evdotphasmia          rD, rA, rB
++	evdotphasumia         rD, rA, rB
++	evdotphassfra         rD, rA, rB
++	evdotphssmia          rD, rA, rB
++	evdotphsssfra         rD, rA, rB
++	evdotphausiaaw        rD, rA, rB
++	evdotphassiaaw        rD, rA, rB
++	evdotphasusiaaw       rD, rA, rB
++	evdotphassfaaw        rD, rA, rB
++	evdotphsssiaaw        rD, rA, rB
++	evdotphsssfaaw        rD, rA, rB
++	evdotphaumiaaw        rD, rA, rB
++	evdotphasmiaaw        rD, rA, rB
++	evdotphasumiaaw       rD, rA, rB
++	evdotphassfraaw       rD, rA, rB
++	evdotphssmiaaw        rD, rA, rB
++	evdotphsssfraaw       rD, rA, rB
++	evdotp4hgaumi         rD, rA, rB
++	evdotp4hgasmi         rD, rA, rB
++	evdotp4hgasumi        rD, rA, rB
++	evdotp4hgasmf         rD, rA, rB
++	evdotp4hgssmi         rD, rA, rB
++	evdotp4hgssmf         rD, rA, rB
++	evdotp4hxgasmi        rD, rA, rB
++	evdotp4hxgasmf        rD, rA, rB
++	evdotpbaumi           rD, rA, rB
++	evdotpbasmi           rD, rA, rB
++	evdotpbasumi          rD, rA, rB
++	evdotp4hxgssmi        rD, rA, rB
++	evdotp4hxgssmf        rD, rA, rB
++	evdotp4hgaumiaa3      rD, rA, rB
++	evdotp4hgasmiaa3      rD, rA, rB
++	evdotp4hgasumiaa3     rD, rA, rB
++	evdotp4hgasmfaa3      rD, rA, rB
++	evdotp4hgssmiaa3      rD, rA, rB
++	evdotp4hgssmfaa3      rD, rA, rB
++	evdotp4hxgasmiaa3     rD, rA, rB
++	evdotp4hxgasmfaa3     rD, rA, rB
++	evdotpbaumiaaw3       rD, rA, rB
++	evdotpbasmiaaw3       rD, rA, rB
++	evdotpbasumiaaw3      rD, rA, rB
++	evdotp4hxgssmiaa3     rD, rA, rB
++	evdotp4hxgssmfaa3     rD, rA, rB
++	evdotp4hgaumia        rD, rA, rB
++	evdotp4hgasmia        rD, rA, rB
++	evdotp4hgasumia       rD, rA, rB
++	evdotp4hgasmfa        rD, rA, rB
++	evdotp4hgssmia        rD, rA, rB
++	evdotp4hgssmfa        rD, rA, rB
++	evdotp4hxgasmia       rD, rA, rB
++	evdotp4hxgasmfa       rD, rA, rB
++	evdotpbaumia          rD, rA, rB
++	evdotpbasmia          rD, rA, rB
++	evdotpbasumia         rD, rA, rB
++	evdotp4hxgssmia       rD, rA, rB
++	evdotp4hxgssmfa       rD, rA, rB
++	evdotp4hgaumiaa       rD, rA, rB
++	evdotp4hgasmiaa       rD, rA, rB
++	evdotp4hgasumiaa      rD, rA, rB
++	evdotp4hgasmfaa       rD, rA, rB
++	evdotp4hgssmiaa       rD, rA, rB
++	evdotp4hgssmfaa       rD, rA, rB
++	evdotp4hxgasmiaa      rD, rA, rB
++	evdotp4hxgasmfaa      rD, rA, rB
++	evdotpbaumiaaw        rD, rA, rB
++	evdotpbasmiaaw        rD, rA, rB
++	evdotpbasumiaaw       rD, rA, rB
++	evdotp4hxgssmiaa      rD, rA, rB
++	evdotp4hxgssmfaa      rD, rA, rB
++	evdotpwausi           rD, rA, rB
++	evdotpwassi           rD, rA, rB
++	evdotpwasusi          rD, rA, rB
++	evdotpwaumi           rD, rA, rB
++	evdotpwasmi           rD, rA, rB
++	evdotpwasumi          rD, rA, rB
++	evdotpwssmi           rD, rA, rB
++	evdotpwausiaa3        rD, rA, rB
++	evdotpwassiaa3        rD, rA, rB
++	evdotpwasusiaa3       rD, rA, rB
++	evdotpwsssiaa3        rD, rA, rB
++	evdotpwaumiaa3        rD, rA, rB
++	evdotpwasmiaa3        rD, rA, rB
++	evdotpwasumiaa3       rD, rA, rB
++	evdotpwssmiaa3        rD, rA, rB
++	evdotpwausia          rD, rA, rB
++	evdotpwassia          rD, rA, rB
++	evdotpwasusia         rD, rA, rB
++	evdotpwaumia          rD, rA, rB
++	evdotpwasmia          rD, rA, rB
++	evdotpwasumia         rD, rA, rB
++	evdotpwssmia          rD, rA, rB
++	evdotpwausiaa         rD, rA, rB
++	evdotpwassiaa         rD, rA, rB
++	evdotpwasusiaa        rD, rA, rB
++	evdotpwsssiaa         rD, rA, rB
++	evdotpwaumiaa         rD, rA, rB
++	evdotpwasmiaa         rD, rA, rB
++	evdotpwasumiaa        rD, rA, rB
++	evdotpwssmiaa         rD, rA, rB
++	evaddib               rD, rB, UIMM
++	evaddih               rD, rB, UIMM
++	evsubifh              rD, UIMM, rB
++	evsubifb              rD, UIMM, rB
++	evabsb                rD, rA
++	evabsh                rD, rA
++	evabsd                rD, rA
++	evabss                rD, rA
++	evabsbs               rD, rA
++	evabshs               rD, rA
++	evabsds               rD, rA
++	evnegwo               rD, rA
++	evnegb                rD, rA
++	evnegbo               rD, rA
++	evnegh                rD, rA
++	evnegho               rD, rA
++	evnegd                rD, rA
++	evnegs                rD, rA
++	evnegwos              rD, rA
++	evnegbs               rD, rA
++	evnegbos              rD, rA
++	evneghs               rD, rA
++	evneghos              rD, rA
++	evnegds               rD, rA
++	evextzb               rD, rA
++	evextsbh              rD, rA
++	evextsw               rD, rA
++	evrndwh               rD, rA
++	evrndhb               rD, rA
++	evrnddw               rD, rA
++	evrndwhus             rD, rA
++	evrndwhss             rD, rA
++	evrndhbus             rD, rA
++	evrndhbss             rD, rA
++	evrnddwus             rD, rA
++	evrnddwss             rD, rA
++	evrndwnh              rD, rA
++	evrndhnb              rD, rA
++	evrnddnw              rD, rA
++	evrndwnhus            rD, rA
++	evrndwnhss            rD, rA
++	evrndhnbus            rD, rA
++	evrndhnbss            rD, rA
++	evrnddnwus            rD, rA
++	evrnddnwss            rD, rA
++	evcntlzh              rD, rA
++	evcntlsh              rD, rA
++	evpopcntb             rD, rA
++	circinc               rD, rA, rB
++	evunpkhibui           rD, rA
++	evunpkhibsi           rD, rA
++	evunpkhihui           rD, rA
++	evunpkhihsi           rD, rA
++	evunpklobui           rD, rA
++	evunpklobsi           rD, rA
++	evunpklohui           rD, rA
++	evunpklohsi           rD, rA
++	evunpklohf            rD, rA
++	evunpkhihf            rD, rA
++	evunpklowgsf          rD, rA
++	evunpkhiwgsf          rD, rA
++	evsatsduw             rD, rA
++	evsatsdsw             rD, rA
++	evsatshub             rD, rA
++	evsatshsb             rD, rA
++	evsatuwuh             rD, rA
++	evsatswsh             rD, rA
++	evsatswuh             rD, rA
++	evsatuhub             rD, rA
++	evsatuduw             rD, rA
++	evsatuwsw             rD, rA
++	evsatshuh             rD, rA
++	evsatuhsh             rD, rA
++	evsatswuw             rD, rA
++	evsatswgsdf           rD, rA
++	evsatsbub             rD, rA
++	evsatubsb             rD, rA
++	evmaxhpuw             rD, rA
++	evmaxhpsw             rD, rA
++	evmaxbpuh             rD, rA
++	evmaxbpsh             rD, rA
++	evmaxwpud             rD, rA
++	evmaxwpsd             rD, rA
++	evminhpuw             rD, rA
++	evminhpsw             rD, rA
++	evminbpuh             rD, rA
++	evminbpsh             rD, rA
++	evminwpud             rD, rA
++	evminwpsd             rD, rA
++	evmaxmagws            rD, rA, rB
++	evsl                  rD, rA, rB
++	evsli                 rD, rA, UIMM
++	evsplatie             rD, SIMM
++	evsplatib             rD, SIMM
++	evsplatibe            rD, SIMM
++	evsplatih             rD, SIMM
++	evsplatihe            rD, SIMM
++	evsplatid             rD, SIMM
++	evsplatia             rD, SIMM
++	evsplatiea            rD, SIMM
++	evsplatiba            rD, SIMM
++	evsplatibea           rD, SIMM
++	evsplatiha            rD, SIMM
++	evsplatihea           rD, SIMM
++	evsplatida            rD, SIMM
++	evsplatfio            rD, SIMM
++	evsplatfib            rD, SIMM
++	evsplatfibo           rD, SIMM
++	evsplatfih            rD, SIMM
++	evsplatfiho           rD, SIMM
++	evsplatfid            rD, SIMM
++	evsplatfia            rD, SIMM
++	evsplatfioa           rD, SIMM
++	evsplatfiba           rD, SIMM
++	evsplatfiboa          rD, SIMM
++	evsplatfiha           rD, SIMM
++	evsplatfihoa          rD, SIMM
++	evsplatfida           rD, SIMM
++	evcmpgtdu             crD, rA, rB
++	evcmpgtds             crD, rA, rB
++	evcmpltdu             crD, rA, rB
++	evcmpltds             crD, rA, rB
++	evcmpeqd              crD, rA, rB
++	evswapbhilo           rD, rA, rB
++	evswapblohi           rD, rA, rB
++	evswaphhilo           rD, rA, rB
++	evswaphlohi           rD, rA, rB
++	evswaphe              rD, rA, rB
++	evswaphhi             rD, rA, rB
++	evswaphlo             rD, rA, rB
++	evswapho              rD, rA, rB
++	evinsb                rD, rA, Ddd, bbb
++	evxtrb                rD, rA, Ddd, bbb
++	evsplath              rD, rA, hh
++	evsplatb              rD, rA, bbb
++	evinsh                rD, rA, dd, hh
++	evclrbe               rD, rA, mask
++	evclrbo               rD, rA, mask
++	evclrh                rD, rA, mask
++	evxtrh                rD, rA, dd, hh
++	evselbitm0            rD, rA, rB
++	evselbitm1            rD, rA, rB
++	evselbit              rD, rA, rB
++	evperm                rD, rA, rB
++	evperm2               rD, rA, rB
++	evperm3               rD, rA, rB
++	evxtrd                rD, rA, rB, offset
++	evsrbu                rD, rA, rB
++	evsrbs                rD, rA, rB
++	evsrbiu               rD, rA, UIMM_LT8
++	evsrbis               rD, rA, UIMM_LT8
++	evslb                 rD, rA, rB
++	evrlb                 rD, rA, rB
++	evslbi                rD, rA, UIMM_LT8
++	evrlbi                rD, rA, UIMM_LT8
++	evsrhu                rD, rA, rB
++	evsrhs                rD, rA, rB
++	evsrhiu               rD, rA, UIMM_LT16
++	evsrhis               rD, rA, UIMM_LT16
++	evslh                 rD, rA, rB
++	evrlh                 rD, rA, rB
++	evslhi                rD, rA, UIMM_LT16
++	evrlhi                rD, rA, UIMM_LT16
++	evsru                 rD, rA, rB
++	evsrs                 rD, rA, rB
++	evsriu                rD, rA, UIMM
++	evsris                rD, rA, UIMM
++	evlvsl                rD, rA, rB
++	evlvsr                rD, rA, rB
++	evsroiu               rD, rA, nnn
++	evsrois               rD, rA, nnn
++	evsloi                rD, rA, nnn
++	evfssqrt              rD, rA
++	evfscfh               rD, rB
++	evfscth               rD, rB
++	evfsmax               rD, rA, rB
++	evfsmin               rD, rA, rB
++	evfsaddsub            rD, rA, rB
++	evfssubadd            rD, rA, rB
++	evfssum               rD, rA, rB
++	evfsdiff              rD, rA, rB
++	evfssumdiff           rD, rA, rB
++	evfsdiffsum           rD, rA, rB
++	evfsaddx              rD, rA, rB
++	evfssubx              rD, rA, rB
++	evfsaddsubx           rD, rA, rB
++	evfssubaddx           rD, rA, rB
++	evfsmulx              rD, rA, rB
++	evfsmule              rD, rA, rB
++	evfsmulo              rD, rA, rB
++	evldbx                rD, rA, rB
++	evldb                 rD, UIMM_8 (rA)
++	evlhhsplathx          rD, rA, rB
++	evlhhsplath           rD, UIMM_2 (rA)
++	evlwbsplatwx          rD, rA, rB
++	evlwbsplatw           rD, UIMM_4 (rA)
++	evlwhsplatwx          rD, rA, rB
++	evlwhsplatw           rD, UIMM_4 (rA)
++	evlbbsplatbx          rD, rA, rB
++	evlbbsplatb           rD, UIMM_1 (rA)
++	evstdbx               rS, rA, rB
++	evstdb                rS, UIMM_8 (rA)
++	evlwbex               rD, rA, rB
++	evlwbe                rD, UIMM_4 (rA)
++	evlwboux              rD, rA, rB
++	evlwbou               rD, UIMM_4 (rA)
++	evlwbosx              rD, rA, rB
++	evlwbos               rD, UIMM_4 (rA)
++	evstwbex              rS, rA, rB
++	evstwbe               rS, UIMM_4 (rA)
++	evstwbox              rS, rA, rB
++	evstwbo               rS, UIMM_4 (rA)
++	evstwbx               rS, rA, rB
++	evstwb                rS, UIMM_4 (rA)
++	evsthbx               rS, rA, rB
++	evsthb                rS, UIMM_2 (rA)
++	evlddmx               rD, rA, rB
++	evlddu                rD, UIMM_8 (rA)
++	evldwmx               rD, rA, rB
++	evldwu                rD, UIMM_8 (rA)
++	evldhmx               rD, rA, rB
++	evldhu                rD, UIMM_8 (rA)
++	evldbmx               rD, rA, rB
++	evldbu                rD, UIMM_8 (rA)
++	evlhhesplatmx         rD, rA, rB
++	evlhhesplatu          rD, UIMM_2 (rA)
++	evlhhsplathmx         rD, rA, rB
++	evlhhsplathu          rD, UIMM_2 (rA)
++	evlhhousplatmx        rD, rA, rB
++	evlhhousplatu         rD, UIMM_2 (rA)
++	evlhhossplatmx        rD, rA, rB
++	evlhhossplatu         rD, UIMM_2 (rA)
++	evlwhemx              rD, rA, rB
++	evlwheu               rD, UIMM_4 (rA)
++	evlwbsplatwmx         rD, rA, rB
++	evlwbsplatwu          rD, UIMM_4 (rA)
++	evlwhoumx             rD, rA, rB
++	evlwhouu              rD, UIMM_4 (rA)
++	evlwhosmx             rD, rA, rB
++	evlwhosu              rD, UIMM_4 (rA)
++	evlwwsplatmx          rD, rA, rB
++	evlwwsplatu           rD, UIMM_4 (rA)
++	evlwhsplatwmx         rD, rA, rB
++	evlwhsplatwu          rD, UIMM_4 (rA)
++	evlwhsplatmx          rD, rA, rB
++	evlwhsplatu           rD, UIMM_4 (rA)
++	evlbbsplatbmx         rD, rA, rB
++	evlbbsplatbu          rD, UIMM_1 (rA)
++	evstddmx              rS, rA, rB
++	evstddu               rS, UIMM_8 (rA)
++	evstdwmx              rS, rA, rB
++	evstdwu               rS, UIMM_8 (rA)
++	evstdhmx              rS, rA, rB
++	evstdhu               rS, UIMM_8 (rA)
++	evstdbmx              rS, rA, rB
++	evstdbu               rS, UIMM_8 (rA)
++	evlwbemx              rD, rA, rB
++	evlwbeu               rD, UIMM_4 (rA)
++	evlwboumx             rD, rA, rB
++	evlwbouu              rD, UIMM_4 (rA)
++	evlwbosmx             rD, rA, rB
++	evlwbosu              rD, UIMM_4 (rA)
++	evstwhemx             rS, rA, rB
++	evstwheu              rS, UIMM_4 (rA)
++	evstwbemx             rS, rA, rB
++	evstwbeu              rS, UIMM_4 (rA)
++	evstwhomx             rS, rA, rB
++	evstwhou              rS, UIMM_4 (rA)
++	evstwbomx             rS, rA, rB
++	evstwbou              rS, UIMM_4 (rA)
++	evstwwemx             rS, rA, rB
++	evstwweu              rS, UIMM_4 (rA)
++	evstwbmx              rS, rA, rB
++	evstwbu               rS, UIMM_4 (rA)
++	evstwwomx             rS, rA, rB
++	evstwwou              rS, UIMM_4 (rA)
++	evsthbmx              rS, rA, rB
++	evsthbu               rS, UIMM_2 (rA)
++	evmhusi               rD, rA, rB
++	evmhssi               rD, rA, rB
++	evmhsusi              rD, rA, rB
++	evmhssf               rD, rA, rB
++	evmhumi               rD, rA, rB
++	evmhssfr              rD, rA, rB
++	evmhesumi             rD, rA, rB
++	evmhosumi             rD, rA, rB
++	evmbeumi              rD, rA, rB
++	evmbesmi              rD, rA, rB
++	evmbesumi             rD, rA, rB
++	evmboumi              rD, rA, rB
++	evmbosmi              rD, rA, rB
++	evmbosumi             rD, rA, rB
++	evmhesumia            rD, rA, rB
++	evmhosumia            rD, rA, rB
++	evmbeumia             rD, rA, rB
++	evmbesmia             rD, rA, rB
++	evmbesumia            rD, rA, rB
++	evmboumia             rD, rA, rB
++	evmbosmia             rD, rA, rB
++	evmbosumia            rD, rA, rB
++	evmwusiw              rD, rA, rB
++	evmwssiw              rD, rA, rB
++	evmwhssfr             rD, rA, rB
++	evmwehgsmfr           rD, rA, rB
++	evmwehgsmf            rD, rA, rB
++	evmwohgsmfr           rD, rA, rB
++	evmwohgsmf            rD, rA, rB
++	evmwhssfra            rD, rA, rB
++	evmwehgsmfra          rD, rA, rB
++	evmwehgsmfa           rD, rA, rB
++	evmwohgsmfra          rD, rA, rB
++	evmwohgsmfa           rD, rA, rB
++	evaddusiaa            rD, rA
++	evaddssiaa            rD, rA
++	evsubfusiaa           rD, rA
++	evsubfssiaa           rD, rA
++	evaddsmiaa            rD, rA
++	evsubfsmiaa           rD, rA
++	evaddh                rD, rA, rB
++	evaddhss              rD, rA, rB
++	evsubfh               rD, rA, rB
++	evsubfhss             rD, rA, rB
++	evaddhx               rD, rA, rB
++	evaddhxss             rD, rA, rB
++	evsubfhx              rD, rA, rB
++	evsubfhxss            rD, rA, rB
++	evaddd                rD, rA, rB
++	evadddss              rD, rA, rB
++	evsubfd               rD, rA, rB
++	evsubfdss             rD, rA, rB
++	evaddb                rD, rA, rB
++	evaddbss              rD, rA, rB
++	evsubfb               rD, rA, rB
++	evsubfbss             rD, rA, rB
++	evaddsubfh            rD, rA, rB
++	evaddsubfhss          rD, rA, rB
++	evsubfaddh            rD, rA, rB
++	evsubfaddhss          rD, rA, rB
++	evaddsubfhx           rD, rA, rB
++	evaddsubfhxss         rD, rA, rB
++	evsubfaddhx           rD, rA, rB
++	evsubfaddhxss         rD, rA, rB
++	evadddus              rD, rA, rB
++	evaddbus              rD, rA, rB
++	evsubfdus             rD, rA, rB
++	evsubfbus             rD, rA, rB
++	evaddwus              rD, rA, rB
++	evaddwxus             rD, rA, rB
++	evsubfwus             rD, rA, rB
++	evsubfwxus            rD, rA, rB
++	evadd2subf2h          rD, rA, rB
++	evadd2subf2hss        rD, rA, rB
++	evsubf2add2h          rD, rA, rB
++	evsubf2add2hss        rD, rA, rB
++	evaddhus              rD, rA, rB
++	evaddhxus             rD, rA, rB
++	evsubfhus             rD, rA, rB
++	evsubfhxus            rD, rA, rB
++	evaddwss              rD, rA, rB
++	evsubfwss             rD, rA, rB
++	evaddwx               rD, rA, rB
++	evaddwxss             rD, rA, rB
++	evsubfwx              rD, rA, rB
++	evsubfwxss            rD, rA, rB
++	evaddsubfw            rD, rA, rB
++	evaddsubfwss          rD, rA, rB
++	evsubfaddw            rD, rA, rB
++	evsubfaddwss          rD, rA, rB
++	evaddsubfwx           rD, rA, rB
++	evaddsubfwxss         rD, rA, rB
++	evsubfaddwx           rD, rA, rB
++	evsubfaddwxss         rD, rA, rB
++	evmar                 rD
++	evsumwu               rD, rA
++	evsumws               rD, rA
++	evsum4bu              rD, rA
++	evsum4bs              rD, rA
++	evsum2hu              rD, rA
++	evsum2hs              rD, rA
++	evdiff2his            rD, rA
++	evsum2his             rD, rA
++	evsumwua              rD, rA
++	evsumwsa              rD, rA
++	evsum4bua             rD, rA
++	evsum4bsa             rD, rA
++	evsum2hua             rD, rA
++	evsum2hsa             rD, rA
++	evdiff2hisa           rD, rA
++	evsum2hisa            rD, rA
++	evsumwuaa             rD, rA
++	evsumwsaa             rD, rA
++	evsum4buaaw           rD, rA
++	evsum4bsaaw           rD, rA
++	evsum2huaaw           rD, rA
++	evsum2hsaaw           rD, rA
++	evdiff2hisaaw         rD, rA
++	evsum2hisaaw          rD, rA
++	evdivwsf              rD, rA, rB
++	evdivwuf              rD, rA, rB
++	evdivs                rD, rA, rB
++	evdivu                rD, rA, rB
++	evaddwegsi            rD, rA, rB
++	evaddwegsf            rD, rA, rB
++	evsubfwegsi           rD, rA, rB
++	evsubfwegsf           rD, rA, rB
++	evaddwogsi            rD, rA, rB
++	evaddwogsf            rD, rA, rB
++	evsubfwogsi           rD, rA, rB
++	evsubfwogsf           rD, rA, rB
++	evaddhhiuw            rD, rA, rB
++	evaddhhisw            rD, rA, rB
++	evsubfhhiuw           rD, rA, rB
++	evsubfhhisw           rD, rA, rB
++	evaddhlouw            rD, rA, rB
++	evaddhlosw            rD, rA, rB
++	evsubfhlouw           rD, rA, rB
++	evsubfhlosw           rD, rA, rB
++	evmhesusiaaw          rD, rA, rB
++	evmhosusiaaw          rD, rA, rB
++	evmhesumiaaw          rD, rA, rB
++	evmhosumiaaw          rD, rA, rB
++	evmbeusiaah           rD, rA, rB
++	evmbessiaah           rD, rA, rB
++	evmbesusiaah          rD, rA, rB
++	evmbousiaah           rD, rA, rB
++	evmbossiaah           rD, rA, rB
++	evmbosusiaah          rD, rA, rB
++	evmbeumiaah           rD, rA, rB
++	evmbesmiaah           rD, rA, rB
++	evmbesumiaah          rD, rA, rB
++	evmboumiaah           rD, rA, rB
++	evmbosmiaah           rD, rA, rB
++	evmbosumiaah          rD, rA, rB
++	evmwlusiaaw3          rD, rA, rB
++	evmwlssiaaw3          rD, rA, rB
++	evmwhssfraaw3         rD, rA, rB
++	evmwhssfaaw3          rD, rA, rB
++	evmwhssfraaw          rD, rA, rB
++	evmwhssfaaw           rD, rA, rB
++	evmwlumiaaw3          rD, rA, rB
++	evmwlsmiaaw3          rD, rA, rB
++	evmwusiaa             rD, rA, rB
++	evmwssiaa             rD, rA, rB
++	evmwehgsmfraa         rD, rA, rB
++	evmwehgsmfaa          rD, rA, rB
++	evmwohgsmfraa         rD, rA, rB
++	evmwohgsmfaa          rD, rA, rB
++	evmhesusianw          rD, rA, rB
++	evmhosusianw          rD, rA, rB
++	evmhesumianw          rD, rA, rB
++	evmhosumianw          rD, rA, rB
++	evmbeusianh           rD, rA, rB
++	evmbessianh           rD, rA, rB
++	evmbesusianh          rD, rA, rB
++	evmbousianh           rD, rA, rB
++	evmbossianh           rD, rA, rB
++	evmbosusianh          rD, rA, rB
++	evmbeumianh           rD, rA, rB
++	evmbesmianh           rD, rA, rB
++	evmbesumianh          rD, rA, rB
++	evmboumianh           rD, rA, rB
++	evmbosmianh           rD, rA, rB
++	evmbosumianh          rD, rA, rB
++	evmwlusianw3          rD, rA, rB
++	evmwlssianw3          rD, rA, rB
++	evmwhssfranw3         rD, rA, rB
++	evmwhssfanw3          rD, rA, rB
++	evmwhssfranw          rD, rA, rB
++	evmwhssfanw           rD, rA, rB
++	evmwlumianw3          rD, rA, rB
++	evmwlsmianw3          rD, rA, rB
++	evmwusian             rD, rA, rB
++	evmwssian             rD, rA, rB
++	evmwehgsmfran         rD, rA, rB
++	evmwehgsmfan          rD, rA, rB
++	evmwohgsmfran         rD, rA, rB
++	evmwohgsmfan          rD, rA, rB
++	evseteqb              rD, rA, rB
++	evseteqb.             rD, rA, rB
++	evseteqh              rD, rA, rB
++	evseteqh.             rD, rA, rB
++	evseteqw              rD, rA, rB
++	evseteqw.             rD, rA, rB
++	evsetgthu             rD, rA, rB
++	evsetgthu.            rD, rA, rB
++	evsetgths             rD, rA, rB
++	evsetgths.            rD, rA, rB
++	evsetgtwu             rD, rA, rB
++	evsetgtwu.            rD, rA, rB
++	evsetgtws             rD, rA, rB
++	evsetgtws.            rD, rA, rB
++	evsetgtbu             rD, rA, rB
++	evsetgtbu.            rD, rA, rB
++	evsetgtbs             rD, rA, rB
++	evsetgtbs.            rD, rA, rB
++	evsetltbu             rD, rA, rB
++	evsetltbu.            rD, rA, rB
++	evsetltbs             rD, rA, rB
++	evsetltbs.            rD, rA, rB
++	evsetlthu             rD, rA, rB
++	evsetlthu.            rD, rA, rB
++	evsetlths             rD, rA, rB
++	evsetlths.            rD, rA, rB
++	evsetltwu             rD, rA, rB
++	evsetltwu.            rD, rA, rB
++	evsetltws             rD, rA, rB
++	evsetltws.            rD, rA, rB
++	evsaduw               rD, rA, rB
++	evsadsw               rD, rA, rB
++	evsad4ub              rD, rA, rB
++	evsad4sb              rD, rA, rB
++	evsad2uh              rD, rA, rB
++	evsad2sh              rD, rA, rB
++	evsaduwa              rD, rA, rB
++	evsadswa              rD, rA, rB
++	evsad4uba             rD, rA, rB
++	evsad4sba             rD, rA, rB
++	evsad2uha             rD, rA, rB
++	evsad2sha             rD, rA, rB
++	evabsdifuw            rD, rA, rB
++	evabsdifsw            rD, rA, rB
++	evabsdifub            rD, rA, rB
++	evabsdifsb            rD, rA, rB
++	evabsdifuh            rD, rA, rB
++	evabsdifsh            rD, rA, rB
++	evsaduwaa             rD, rA, rB
++	evsadswaa             rD, rA, rB
++	evsad4ubaaw           rD, rA, rB
++	evsad4sbaaw           rD, rA, rB
++	evsad2uhaaw           rD, rA, rB
++	evsad2shaaw           rD, rA, rB
++	evpkshubs             rD, rA, rB
++	evpkshsbs             rD, rA, rB
++	evpkswuhs             rD, rA, rB
++	evpkswshs             rD, rA, rB
++	evpkuhubs             rD, rA, rB
++	evpkuwuhs             rD, rA, rB
++	evpkswshilvs          rD, rA, rB
++	evpkswgshefrs         rD, rA, rB
++	evpkswshfrs           rD, rA, rB
++	evpkswshilvfrs        rD, rA, rB
++	evpksdswfrs           rD, rA, rB
++	evpksdshefrs          rD, rA, rB
++	evpkuduws             rD, rA, rB
++	evpksdsws             rD, rA, rB
++	evpkswgswfrs          rD, rA, rB
++	evilveh               rD, rA, rB
++	evilveoh              rD, rA, rB
++	evilvhih              rD, rA, rB
++	evilvhiloh            rD, rA, rB
++	evilvloh              rD, rA, rB
++	evilvlohih            rD, rA, rB
++	evilvoeh              rD, rA, rB
++	evilvoh               rD, rA, rB
++	evdlveb               rD, rA, rB
++	evdlveh               rD, rA, rB
++	evdlveob              rD, rA, rB
++	evdlveoh              rD, rA, rB
++	evdlvob               rD, rA, rB
++	evdlvoh               rD, rA, rB
++	evdlvoeb              rD, rA, rB
++	evdlvoeh              rD, rA, rB
++	evmaxbu               rD, rA, rB
++	evmaxbs               rD, rA, rB
++	evmaxhu               rD, rA, rB
++	evmaxhs               rD, rA, rB
++	evmaxwu               rD, rA, rB
++	evmaxws               rD, rA, rB
++	evmaxdu               rD, rA, rB
++	evmaxds               rD, rA, rB
++	evminbu               rD, rA, rB
++	evminbs               rD, rA, rB
++	evminhu               rD, rA, rB
++	evminhs               rD, rA, rB
++	evminwu               rD, rA, rB
++	evminws               rD, rA, rB
++	evmindu               rD, rA, rB
++	evminds               rD, rA, rB
++	evavgwu               rD, rA, rB
++	evavgws               rD, rA, rB
++	evavgbu               rD, rA, rB
++	evavgbs               rD, rA, rB
++	evavghu               rD, rA, rB
++	evavghs               rD, rA, rB
++	evavgdu               rD, rA, rB
++	evavgds               rD, rA, rB
++	evavgwur              rD, rA, rB
++	evavgwsr              rD, rA, rB
++	evavgbur              rD, rA, rB
++	evavgbsr              rD, rA, rB
++	evavghur              rD, rA, rB
++	evavghsr              rD, rA, rB
++	evavgdur              rD, rA, rB
++	evavgdsr              rD, rA, rB
++
++;#SPE2 mapped by macro
++	evdotphsssi           rD, rA, rB
++	evdotphsssia          rD, rA, rB
++	evdotpwsssi           rD, rA, rB
++	evdotpwsssia          rD, rA, rB
++
++
++
++
+diff --git a/gas/testsuite/gas/ppc/spe_ambiguous.d b/gas/testsuite/gas/ppc/spe_ambiguous.d
+new file mode 100644
+index 0000000..14c6e0e
+--- /dev/null
++++ b/gas/testsuite/gas/ppc/spe_ambiguous.d
+@@ -0,0 +1,15 @@
++#as: -mvle
++#objdump: -d -Mspe
++#name: Validate SPE instructions
++
++.*: +file format elf.*-powerpc.*
++
++Disassembly of section .text:
++
++00000000 <.text>:
++   0:	10 01 12 04 	evsubfw r0,r1,r2
++   4:	10 01 12 04 	evsubw r0,r2,r1
++   8:	10 1f 12 06 	evsubifw r0,31,r2
++   c:	10 1f 12 06 	evsubiw r0,r2,31
++  10:	10 01 12 18 	evnor   r0,r1,r2
++  14:	10 01 0a 18 	evnot   r0,r1
+diff --git a/gas/testsuite/gas/ppc/spe_ambiguous.s b/gas/testsuite/gas/ppc/spe_ambiguous.s
+new file mode 100644
+index 0000000..b60e02b
+--- /dev/null
++++ b/gas/testsuite/gas/ppc/spe_ambiguous.s
+@@ -0,0 +1,21 @@
++# PA SPE instructions
++	.section ".text"
++	.equ	rA,1
++	.equ	rB,2
++	.equ	rD,0
++	.equ	rS,0
++	.equ	rT,0
++	.equ	UIMM, 31
++	.equ	UIMM_2, 2
++	.equ	UIMM_4, 4
++	.equ	UIMM_8, 8
++	.equ	SIMM, -16
++	.equ	crD, 0
++	.equ	crS, 0
++
++	evsubfw         rS, rA, rB
++	evsubw          rS, rB, rA
++	evsubifw        rS, UIMM, rB
++	evsubiw         rS, rB, UIMM
++	evnor           rS, rA, rB
++	evnot           rS, rA
+diff --git a/ld/emultempl/ppc32elf.em b/ld/emultempl/ppc32elf.em
+index 1012bc9..22597d7 100644
+--- a/ld/emultempl/ppc32elf.em
++++ b/ld/emultempl/ppc32elf.em
+@@ -38,7 +38,7 @@ static int notlsopt = 0;
+ /* Choose the correct place for .got.  */
+ static int old_got = 0;
+ 
+-static struct ppc_elf_params params = { PLT_UNSET, -1, 0, 0, 0, 0, 0, 0, 0 };
++static struct ppc_elf_params params = { PLT_UNSET, -1, 0, 0, 0, 0, 0, 0, 0, 0 };
+ 
+ static void
+ ppc_after_open_output (void)
+@@ -250,6 +250,7 @@ PARSE_AND_LIST_PROLOGUE=${PARSE_AND_LIST_PROLOGUE}'
+ #define OPTION_NO_PPC476_WORKAROUND	(OPTION_PPC476_WORKAROUND + 1)
+ #define OPTION_NO_PICFIXUP		(OPTION_NO_PPC476_WORKAROUND + 1)
+ #define OPTION_VLE_RELOC_FIXUP		(OPTION_NO_PICFIXUP + 1)
++#define OPTION_NO_E200Z425_REL_ERR	(OPTION_VLE_RELOC_FIXUP + 1)
+ '
+ 
+ PARSE_AND_LIST_LONGOPTS=${PARSE_AND_LIST_LONGOPTS}'
+@@ -268,6 +269,7 @@ PARSE_AND_LIST_LONGOPTS=${PARSE_AND_LIST_LONGOPTS}'
+   { "no-ppc476-workaround", no_argument, NULL, OPTION_NO_PPC476_WORKAROUND },
+   { "no-pic-fixup", no_argument, NULL, OPTION_NO_PICFIXUP },
+   { "vle-reloc-fixup", no_argument, NULL, OPTION_VLE_RELOC_FIXUP },
++  { "no-e200z425-rel-error ", no_argument, NULL, OPTION_NO_E200Z425_REL_ERR },
+ '
+ 
+ PARSE_AND_LIST_OPTIONS=${PARSE_AND_LIST_OPTIONS}'
+@@ -287,7 +289,8 @@ PARSE_AND_LIST_OPTIONS=${PARSE_AND_LIST_OPTIONS}'\
+                               Avoid a cache bug on ppc476.\n\
+   --no-ppc476-workaround      Disable workaround.\n\
+   --no-pic-fixup              Don'\''t edit non-pic to pic.\n\
+-  --vle-reloc-fixup           Correct old object file 16A/16D relocation.\n"
++  --vle-reloc-fixup           Correct old object file 16A/16D relocation.\n\
++  --no-e200z425-rel-error     Disable e200z425 relocation error.\n"
+ 		   ));
+ '
+ 
+@@ -349,6 +352,10 @@ PARSE_AND_LIST_ARGS_CASES=${PARSE_AND_LIST_ARGS_CASES}'
+     case OPTION_VLE_RELOC_FIXUP:
+       params.vle_reloc_fixup = 1;
+       break;
++
++    case OPTION_NO_E200Z425_REL_ERR:
++      params.disable_e200z425_rel_check = 1;
++      break;
+ '
+ 
+ # Put these extra ppc32elf routines in ld_${EMULATION_NAME}_emulation
+diff --git a/ld/ld.texinfo b/ld/ld.texinfo
+index d393acd..893114c 100644
+--- a/ld/ld.texinfo
++++ b/ld/ld.texinfo
+@@ -7309,6 +7309,11 @@ symbol that encodes the stub type and destination.
+ PowerPC @command{ld} normally performs some optimization of code
+ sequences used to access Thread-Local Storage.  Use this option to
+ disable the optimization.
++
++@cindex Freescale e200z425 errata
++@kindex --no-e200z425-rel-error
++@item --no-e200z425-rel-error
++This option disables linker check of illegal relocations for e200z425 core.
+ @end table
+ 
+ @ifclear GENERIC
+diff --git a/ld/ldfile.c b/ld/ldfile.c
+index 0943bb2..a46fc63 100644
+--- a/ld/ldfile.c
++++ b/ld/ldfile.c
+@@ -591,7 +591,11 @@ ldfile_open_command_file_1 (const char *name, bfd_boolean default_only)
+   FILE *ldlex_input_stack;
+   bfd_boolean sysrooted;
+ 
++#ifdef _WIN32
++  ldlex_input_stack = ldfile_find_command_file ((strcmp (name, "/dev/null") == 0)?("nul"):(name), default_only, &sysrooted);
++#else
+   ldlex_input_stack = ldfile_find_command_file (name, default_only, &sysrooted);
++#endif
+ 
+   if (ldlex_input_stack == NULL)
+     {

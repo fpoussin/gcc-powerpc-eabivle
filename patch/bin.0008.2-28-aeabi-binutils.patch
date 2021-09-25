@@ -1,0 +1,25 @@
+diff --git a/gas/configure.tgt b/gas/configure.tgt
+index 711d537..20beba5 100644
+--- a/gas/configure.tgt
++++ b/gas/configure.tgt
+@@ -388,6 +388,7 @@ case ${generic_target} in
+   ppc-*-beos*)				fmt=coff ;;
+   ppc-*-*n*bsd* | ppc-*-elf*)		fmt=elf ;;
+   ppc-*-eabi* | ppc-*-sysv4*)		fmt=elf ;;
++  ppc-*-aeabi*)				fmt=elf ;;
+   ppc-*-linux-*)			fmt=elf em=linux ;;
+   ppc-*-solaris*)			fmt=elf em=solaris ;;
+   ppc-*-rtems*)				fmt=elf ;;
+diff --git a/ld/configure.tgt b/ld/configure.tgt
+index b85c6bb..c9beb26 100644
+--- a/ld/configure.tgt
++++ b/ld/configure.tgt
+@@ -598,7 +598,7 @@ powerpc64-*-freebsd*)
+ powerpc-*-vxworks*)
+ 			targ_emul=elf32ppcvxworks
+ 			targ_extra_emuls="elf32ppc elf32ppclinux elf32ppcsim" ;;
+-powerpc*-*-elf* | powerpc*-*-eabi* | powerpc*-*-sysv* \
++powerpc*-*-elf* | powerpc*-*-eabi* | powerpc*-*-aeabi* | powerpc*-*-sysv* \
+   | powerpc*-*-linux* | powerpc*-*-netbsd* | powerpc*-*-openbsd* \
+   | powerpc*-*-solaris* | powerpc*-*-kaos* | powerpc*-*-vxworks*)
+ 			case "${targ}" in

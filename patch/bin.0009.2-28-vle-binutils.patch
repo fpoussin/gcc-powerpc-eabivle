@@ -1,0 +1,110 @@
+diff --git a/binutils/objdump.c b/binutils/objdump.c
+index f61968b..8d16039 100644
+--- a/binutils/objdump.c
++++ b/binutils/objdump.c
+@@ -481,6 +481,10 @@ dump_section_header (bfd *abfd, asection *section,
+   PF (SEC_NEVER_LOAD, "NEVER_LOAD");
+   PF (SEC_EXCLUDE, "EXCLUDE");
+   PF (SEC_SORT_ENTRIES, "SORT_ENTRIES");
++  if (bfd_get_arch(abfd) == bfd_arch_powerpc || bfd_get_arch (abfd) == bfd_mach_ppc_vle)
++    {
++      PF (SEC_TIC54X_BLOCK, "VLE"); /* hack, would have to include ppc.h */
++    }
+   if (bfd_get_arch (abfd) == bfd_arch_tic54x)
+     {
+       PF (SEC_TIC54X_BLOCK, "BLOCK");
+diff --git a/binutils/readelf.c b/binutils/readelf.c
+index 8dca490..25615f7 100644
+--- a/binutils/readelf.c
++++ b/binutils/readelf.c
+@@ -5491,7 +5491,9 @@ get_elf_section_flags (bfd_vma sh_flags)
+       /* ARM specific.  */
+       /* 21 */ { STRING_COMMA_LEN ("ENTRYSECT") },
+       /* 22 */ { STRING_COMMA_LEN ("ARM_PURECODE") },
+-      /* 23 */ { STRING_COMMA_LEN ("COMDEF") }
++      /* 23 */ { STRING_COMMA_LEN ("COMDEF") },
++      /* VLE specific.  */
++      /* 24 */ { STRING_COMMA_LEN ("VLE") }
+     };
+ 
+   if (do_section_details)
+@@ -5524,6 +5526,7 @@ get_elf_section_flags (bfd_vma sh_flags)
+ 	    case SHF_TLS:		sindex = 9; break;
+ 	    case SHF_EXCLUDE:		sindex = 18; break;
+ 	    case SHF_COMPRESSED:	sindex = 20; break;
++	    case SHF_PPC_VLE:		sindex = 24; break;
+ 
+ 	    default:
+ 	      sindex = -1;
+@@ -5617,6 +5620,7 @@ get_elf_section_flags (bfd_vma sh_flags)
+ 	    case SHF_TLS:		*p = 'T'; break;
+ 	    case SHF_EXCLUDE:		*p = 'E'; break;
+ 	    case SHF_COMPRESSED:	*p = 'C'; break;
++	    case SHF_PPC_VLE:		*p = 'V'; break;
+ 
+ 	    default:
+ 	      if ((elf_header.e_machine == EM_X86_64
+diff --git a/gas/config/obj-elf.c b/gas/config/obj-elf.c
+index bfdc118..0a4d5b5 100644
+--- a/gas/config/obj-elf.c
++++ b/gas/config/obj-elf.c
+@@ -677,6 +677,11 @@ obj_elf_change_section (const char *name,
+ 	    /* RX init/fini arrays can and should have the "awx" attributes set.  */
+ 	    ;
+ #endif
++#ifdef TC_PPC
++	  /* A section on powerpc-vle may have SHF_PPC_VLE.  */
++	  else if ((attr & ~ssect->attr) == SHF_PPC_VLE)
++	    override = TRUE;
++#endif
+ 	  else
+ 	    {
+ 	      if (group_name == NULL)
+diff --git a/gas/config/tc-ppc.c b/gas/config/tc-ppc.c
+index 80a733c..d104d14 100644
+--- a/gas/config/tc-ppc.c
++++ b/gas/config/tc-ppc.c
+@@ -3566,13 +3566,26 @@ ppc_section_type (char *str, size_t len)
+ }
+ 
+ int
+-ppc_section_flags (flagword flags, bfd_vma attr ATTRIBUTE_UNUSED, int type)
++ppc_section_flags (flagword flags, bfd_vma attr, int type)
+ {
+-  if (type == SHT_ORDERED)
+-    flags |= SEC_ALLOC | SEC_LOAD | SEC_SORT_ENTRIES;
++	  if (type == SHT_ORDERED)
++	    flags |= SEC_ALLOC | SEC_LOAD | SEC_SORT_ENTRIES;
++
++	  if (attr == SHF_PPC_VLE)
++	    flags |= SEC_PPC_VLE;
+ 
+   return flags;
+ }
++
++bfd_vma
++ppc_elf_section_letter (int letter, const char **ptrmsg)
++{
++  if (letter == 'v')
++    return SHF_PPC_VLE;
++
++  *ptrmsg = _("bad .section directive: want a,e,v,w,x,M,S,G,T in string");
++  return -1;
++}
+ #endif /* OBJ_ELF */
+ 
+ 
+diff --git a/gas/config/tc-ppc.h b/gas/config/tc-ppc.h
+index 85a3def..55b77d4 100644
+--- a/gas/config/tc-ppc.h
++++ b/gas/config/tc-ppc.h
+@@ -226,6 +226,9 @@ extern int ppc_section_flags (flagword, bfd_vma, int);
+ #define tc_comment_chars ppc_comment_chars
+ extern const char *ppc_comment_chars;
+ 
++#define md_elf_section_letter		ppc_elf_section_letter
++extern bfd_vma ppc_elf_section_letter (int, const char **);
++
+ /* Keep relocations relative to the GOT, or non-PC relative.  */
+ #define tc_fix_adjustable(FIX) ppc_fix_adjustable (FIX)
+ extern int ppc_fix_adjustable (struct fix *);

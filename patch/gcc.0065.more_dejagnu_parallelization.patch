@@ -1,0 +1,14 @@
+diff --git a/gcc/Makefile.in b/gcc/Makefile.in
+index 7fa4cba..34fa6ac 100644
+--- a/gcc/Makefile.in
++++ b/gcc/Makefile.in
+@@ -3625,8 +3625,7 @@ check_p_subdirs=$(wordlist 1,$(words $(check_$*_parallelize)),$(check_p_numbers)
+ # to lang_checks_parallelized variable and define check_$lang_parallelize
+ # variable (see above check_gcc_parallelize description).
+ $(lang_checks_parallelized): check-% : site.exp
+-	@if [ -z "$(filter-out --target_board=%,$(filter-out --extra_opts%,$(RUNTESTFLAGS)))" ] \
+-	    && [ "$(filter -j, $(MFLAGS))" = "-j" ]; then \
++	@if [ -n "$(filter -j%, $(MFLAGS))" ]; then \
+ 	  $(MAKE) TESTSUITEDIR="$(TESTSUITEDIR)" RUNTESTFLAGS="$(RUNTESTFLAGS)" \
+ 	    check-parallel-$* \
+ 	    $(patsubst %,check-parallel-$*_%, $(check_p_subdirs)); \

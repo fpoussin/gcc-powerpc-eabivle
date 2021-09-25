@@ -1,0 +1,12 @@
+diff -ru gcc-4.9.4-orig/gcc/config/rs6000/rs6000.md gcc-4.9.4/gcc/config/rs6000/rs6000.md
+--- gcc-4.9.4-orig/gcc/config/rs6000/rs6000.md	2017-05-22 13:26:01.703595129 -0500
++++ gcc-4.9.4/gcc/config/rs6000/rs6000.md	2017-05-24 15:20:53.767558124 -0500
+@@ -16092,7 +16090,7 @@
+ 			    [(match_operand:GPR 1 "register_operand")
+ 			     (match_operand:GPR 2 "reg_or_short_operand")])
+ 	    (match_operand 3 "zero_constant" ""))]
+-  ""
++  "!TARGET_VLE"
+   "")
+ 
+ (define_insn ""

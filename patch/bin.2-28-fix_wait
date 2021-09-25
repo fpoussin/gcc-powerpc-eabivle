@@ -1,0 +1,15 @@
+--- binutils-2.28/opcodes/ppc-opc.c-orig	2018-01-19 09:25:42.085784928 -0600
++++ binutils-2.28/opcodes/ppc-opc.c	2018-01-19 10:00:21.343638549 -0600
+@@ -7439,9 +7439,9 @@
+ {"andc",	XRC(31,60,0),	X_MASK,	     COM,	0,		{RA, RS, RB}},
+ {"andc.",	XRC(31,60,1),	X_MASK,	     COM,	0,		{RA, RS, RB}},
+ 
+-{"waitrsv",	X(31,62)|(1<<21), 0xffffffff, E500MC|PPCA2, 0,		{0}},
+-{"waitimpl",	X(31,62)|(2<<21), 0xffffffff, E500MC|PPCA2, 0,		{0}},
+-{"wait",	X(31,62),	XWC_MASK,    E500MC|PPCA2, 0,		{WC}},
++{"waitrsv",	X(31,62)|(1<<21), 0xffffffff, BOOKE|PPCSPE|E500|PPCE300|E500MC|PPCA2, 0,	{0}},
++{"waitimpl",	X(31,62)|(2<<21), 0xffffffff, BOOKE|PPCSPE|E500|PPCE300|E500MC|PPCA2, 0,	{0}},
++{"wait",	X(31,62),	XWC_MASK,    BOOKE|PPCSPE|E500|PPCE300|E500MC|PPCA2, 0,	{WC}},
+ 
+ {"dcbstep",	XRT(31,63,0),	XRT_MASK,    E500MC|PPCA2, 0,		{RA0, RB}},
+ 

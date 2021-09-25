@@ -1,0 +1,3399 @@
+diff --git a/gas/config/tc-ppc.c b/gas/config/tc-ppc.c
+index 2f59d47..b34b3c1 100644
+--- a/gas/config/tc-ppc.c
++++ b/gas/config/tc-ppc.c
+@@ -48,6 +48,10 @@ extern int target_big_endian;
+ /* Whether or not, we've set target_big_endian.  */
+ static int set_target_endian = 0;
+ 
++/* Convert or not BookE assembler to VLE */
++int translate_ppc_asm_to_vle = 0;
++char * macro_insn_name = NULL;
++
+ /* SPE version. Allowed values: 1 or 2 */
+ int spe_version = 1;
+ 
+@@ -152,6 +156,9 @@ static void ppc_pe_section (int);
+ static void ppc_pe_function (int);
+ static void ppc_pe_tocd (int);
+ #endif
++
++static void md_assemble_via_translation(char * str);
++static void md_assemble_really(char * str);
+ 
+ /* Generic assembler global variables which must be defined by all
+    targets.  */
+@@ -950,6 +957,10 @@ static struct hash_control *ppc_hash;
+ /* Macro hash table.  */
+ static struct hash_control *ppc_macro_hash;
+ 
++/* Translation hash table */
++static struct hash_control *ppc_trans_hash;
++
++
+ #ifdef OBJ_ELF
+ /* What type of shared library support to use.  */
+ static enum { SHLIB_NONE, SHLIB_PIC, SHLIB_MRELOCATABLE } shlib = SHLIB_NONE;
+@@ -1068,6 +1079,7 @@ const struct option md_longopts[] = {
+   {"nops", required_argument, NULL, OPTION_NOPS},
+   {"ppc476-workaround", no_argument, &warn_476, 1},
+   {"no-ppc476-workaround", no_argument, &warn_476, 0},
++  {"ppc_asm_to_vle", no_argument, &translate_ppc_asm_to_vle, 1},
+   {NULL, no_argument, NULL, 0}
+ };
+ const size_t md_longopts_size = sizeof (md_longopts);
+@@ -1345,7 +1357,8 @@ PowerPC options:\n\
+ #endif
+   fprintf (stream, _("\
+ -nops=count             when aligning, more than COUNT nops uses a branch\n\
+--ppc476-workaround      warn if emitting data to code sections\n"));
++-ppc476-workaround      warn if emitting data to code sections\n\
++-ppc_asm_to_vle         translate BookE instructions to VLE (requires -mvle)\n"));
+ }
+ 
+ /* Set ppc_cpu if it is not already set.  */
+@@ -1504,12 +1517,17 @@ ppc_setup_opcodes (void)
+   const struct powerpc_opcode *op_end;
+   const struct powerpc_macro *macro;
+   const struct powerpc_macro *macro_end;
++  const struct ppc_translate *trans;
++  const struct ppc_translate *trans_end;  
++  bfd_boolean translatable_insn = FALSE;
+   bfd_boolean bad_insn = FALSE;
+ 
+   if (ppc_hash != NULL)
+     hash_die (ppc_hash);
+   if (ppc_macro_hash != NULL)
+     hash_die (ppc_macro_hash);
++  if (ppc_trans_hash != NULL)
++    hash_die (ppc_trans_hash);
+ 
+   /* Insert the opcodes into a hash table.  */
+   ppc_hash = hash_new ();
+@@ -1549,9 +1567,36 @@ ppc_setup_opcodes (void)
+ 	}
+     }
+ 
++  /* Insert the translation into a hash table.  */
++  if (translate_ppc_asm_to_vle)
++    {
++      ppc_trans_hash = hash_new ();
++
++      trans_end = ppc_booke2vle + ppc_num_booke2vle;
++      for (trans = ppc_booke2vle; trans < trans_end; trans++)
++        {
++          const char *retval;
++          retval = hash_insert (ppc_trans_hash, trans->name, (void *) trans);
++          if (retval != (const char *) NULL)
++            {
++            as_bad (_("duplicate translation %s"), trans->name);
++            bad_insn = TRUE;
++            }
++        }
++    }    
++    
+   op_end = powerpc_opcodes + powerpc_num_opcodes;
+   for (op = powerpc_opcodes; op < op_end; op++)
+     {
++      if (translate_ppc_asm_to_vle)
++        {
++          trans = (const struct ppc_translate *) hash_find(ppc_trans_hash, op->name);
++          if (trans != (const struct ppc_translate *) NULL) 
++            translatable_insn = TRUE;
++          else
++            translatable_insn = FALSE;  
++        }
++
+       if (ENABLE_CHECKING)
+ 	{
+ 	  if (op != powerpc_opcodes)
+@@ -1581,7 +1626,7 @@ ppc_setup_opcodes (void)
+ 	      as_bad (_("%s is enabled by vle flag"), op->name);
+ 	      bad_insn = TRUE;
+ 	    }
+-	  if (PPC_OP (op->opcode) != 4
++	  if (!translatable_insn && PPC_OP (op->opcode) != 4
+ 	      && PPC_OP (op->opcode) != 31
+ 	      && (op->deprecated & PPC_OPCODE_VLE) == 0)
+ 	    {
+@@ -1592,7 +1637,7 @@ ppc_setup_opcodes (void)
+ 	}
+ 
+       if ((ppc_cpu & op->flags) != 0
+-	  && !(ppc_cpu & op->deprecated))
++	  && !((ppc_cpu & op->deprecated) != 0 && !translatable_insn) )
+ 	{
+ 	  const char *retval;
+ 
+@@ -2693,6 +2738,346 @@ struct ppc_fixup
+ void
+ md_assemble (char *str)
+ {
++ if (!translate_ppc_asm_to_vle)
++    {
++      /* call original md_assemble */
++      md_assemble_really(str);
++    }
++  else
++    {
++      if ((ppc_cpu & PPC_OPCODE_VLE) != PPC_OPCODE_VLE)
++        {
++          as_fatal(_("the use of -ppc_asm_to_vle requires -mvle."));
++        }
++
++      /* Do prepass and then call regular assembler */
++      md_assemble_via_translation(str);
++    }
++
++}
++
++void
++md_assemble_via_translation(char * str)
++{
++
++  int try_to_translate = 0;
++  char *s, *new_str;
++  const struct powerpc_opcode *opcode;
++  const struct ppc_translate *trans_insn;
++  unsigned long insn;
++  const unsigned char *opindex_ptr;
++  int skip_optional;
++  int need_paren;
++  int next_opindex;
++  int i;
++  char ** literal_operands;
++  const char *errmsg = NULL;
++
++  /* new_str for md_assemble_really and for translation */
++  new_str = xmalloc((strlen(str) + 1) * 3);
++  strcpy(new_str, str);
++  
++  /* Get the opcode.  */
++  for (s = str; *s != '\0' && !ISSPACE(*s); s++)
++    ;
++  if (*s != '\0')
++    *s++ = '\0';
++
++  /* Look up the opcode in the hash table.  */
++  opcode = (const struct powerpc_opcode *) hash_find(ppc_hash, str);
++  if (opcode == (const struct powerpc_opcode *) NULL)  
++    {
++      const struct powerpc_macro *macro;
++
++      macro = (const struct powerpc_macro *) hash_find (ppc_macro_hash, str);
++      if (macro == (const struct powerpc_macro *) NULL)
++        as_bad (_("unrecognized opcode: `%s'"), str);
++      else
++        {
++          /* If instruction defined by macro we need to keep real name 
++           * to distinguish it from substitued name */
++          macro_insn_name = strdup(str);
++          
++          ppc_macro (s, macro);
++          
++          free(macro_insn_name);
++        }
++      
++      free(new_str);
++      
++      return;
++    }
++
++
++  trans_insn = (const struct ppc_translate *) hash_find(ppc_trans_hash, str);
++
++  if ((opcode->deprecated & PPC_OPCODE_VLE) == PPC_OPCODE_VLE)  
++    {
++      /* Try to translate */
++      if (trans_insn != NULL)
++	{
++	  /* permit translation to VLE */
++	  try_to_translate = 1;
++	}
++      else
++	{
++	  as_bad(_("Could not convert, no equivalent VLE instruction exists for: `%s'"), str);
++	  return;
++	}
++    }
++  else if (trans_insn != NULL)
++    {
++      /* even for VLE capable instruction may be translation function e.g. 'mr' */
++      try_to_translate = 1;
++    }
++
++  if (try_to_translate)
++    {
++      literal_operands = xmalloc(num_powerpc_operands * sizeof(char*));
++           
++
++      insn = opcode->opcode;
++
++      str = s;
++      while (ISSPACE(*str))
++        ++str;
++
++      /* PowerPC operands are just expressions.  The only real issue is
++      that a few operand types are optional.  All cases which might use
++      an optional operand separate the operands only with commas (in some
++      cases parentheses are used, as in ``lwz 1,0(1)'' but such cases never
++      have optional operands).  Most instructions with optional operands
++      have only one.  Those that have more than one optional operand can
++      take either all their operands or none.  So, before we start seriously
++      parsing the operands, we check to see if we have optional operands,
++      and if we do, we count the number of commas to see which operands
++      have been omitted.  */
++      skip_optional = 0;
++      for (opindex_ptr = opcode->operands; *opindex_ptr != 0; opindex_ptr++)
++        {
++        const struct powerpc_operand *operand;
++
++        operand = &powerpc_operands[*opindex_ptr];
++        if ((operand->flags & PPC_OPERAND_OPTIONAL) != 0)
++          {
++            unsigned int opcount;
++            unsigned int num_operands_expected;
++
++            /* There is an optional operand.  Count the number of
++            commas in the input line.  */
++            if (*str == '\0')
++              opcount = 0;
++            else
++              {
++                opcount = 1;
++                s = str;
++                while ((s = strchr(s, ',')) != (char *)NULL)
++                  {
++                    ++opcount;
++                    ++s;
++                  }
++              }
++
++            /* Compute the number of expected operands.
++            Do not count fake operands.  */
++            for (num_operands_expected = 0, i = 0; opcode->operands[i]; i++)
++              if ((powerpc_operands[opcode->operands[i]].flags & PPC_OPERAND_FAKE) == 0)
++                ++num_operands_expected;
++
++            /* If there are fewer operands in the line then are called
++            for by the instruction, we want to skip the optional
++            operands.  */
++            if (opcount < num_operands_expected)
++              skip_optional = 1;
++
++            break;
++          }
++        }
++
++      /* Gather the operands.  */
++      need_paren = 0;
++      next_opindex = 0;
++      for (opindex_ptr = opcode->operands; *opindex_ptr != 0; opindex_ptr++)
++        {
++        const struct powerpc_operand *operand;
++        char *hold;
++        expressionS ex;
++        char endc;
++        int cur_opindex_ptr;
++
++        if (next_opindex == 0)
++          cur_opindex_ptr = *opindex_ptr;
++        else
++          {
++            cur_opindex_ptr = next_opindex;
++            next_opindex = 0;
++          }
++        operand = &powerpc_operands[cur_opindex_ptr];
++        errmsg = NULL;
++
++        /*  extract substring from input line for every operand and
++         *  store in temporary buffer for further translation */
++        char *op_string;
++        char *tempstr = strdup (str);
++        const char *delimeter;
++        
++        if ((operand->flags & PPC_OPERAND_PARENS) != 0 || need_paren)
++          delimeter = ",()";
++        else
++          delimeter = ",";
++
++        if ((op_string = strtok(tempstr, delimeter)) != NULL)
++          {
++            literal_operands[cur_opindex_ptr] = strdup(op_string);
++          }
++        free(tempstr);
++
++
++        /* If this is a fake operand, then we do not expect anything
++        from the input.  */
++        if ((operand->flags & PPC_OPERAND_FAKE) != 0)
++          {
++            insn = (*operand->insert) (insn, 0L, ppc_cpu, &errmsg);
++            if (errmsg != (const char *)NULL)
++              as_bad("%s", errmsg);
++            continue;
++          }
++
++        /* If this is an optional operand, and we are skipping it, just
++        insert a zero.  */
++        if ((operand->flags & PPC_OPERAND_OPTIONAL) != 0
++          && skip_optional)
++          {
++          if (operand->insert)
++            {
++              insn = (*operand->insert) (insn, 0L, ppc_cpu, &errmsg);
++              if (errmsg != (const char *)NULL)
++                as_bad("%s", errmsg);
++            }
++          if ((operand->flags & PPC_OPERAND_NEXT) != 0)
++            next_opindex = *opindex_ptr + 1;
++          continue;
++          }
++
++        /* Gather the operand.  */
++        hold = input_line_pointer;
++        input_line_pointer = str;
++
++        {
++        if ((reg_names_p && (((operand->flags & PPC_OPERAND_CR_BIT) != 0) || ((operand->flags & PPC_OPERAND_CR_REG) != 0))) ||
++          !register_name(&ex))
++          {
++          char save_lex = lex_type['%'];
++
++          if (((operand->flags & PPC_OPERAND_CR_REG) != 0) || (operand->flags & PPC_OPERAND_CR_BIT) != 0)
++            {
++            cr_operand = TRUE;
++            lex_type['%'] |= LEX_BEGIN_NAME;
++            }
++          expression(&ex);
++          cr_operand = FALSE;
++          lex_type['%'] = save_lex;
++          }
++        }
++
++        str = input_line_pointer;
++        input_line_pointer = hold;
++
++        if (ex.X_op == O_illegal)
++          as_bad(_("illegal operand"));
++        else if (ex.X_op == O_absent)
++          as_bad(_("missing operand"));
++        else if (ex.X_op == O_register)
++          {
++            insn = ppc_insert_operand(insn, operand, ex.X_add_number, ppc_cpu, (char *)NULL, 0);
++          }
++        else if (ex.X_op == O_constant)
++          {
++            insn = ppc_insert_operand(insn, operand, ex.X_add_number, ppc_cpu, (char *)NULL, 0);
++          }
++        else
++          {
++            insn = ppc_insert_operand (insn, operand, ex.X_add_number, ppc_cpu, (char *) NULL, 0);
++          }
++
++
++        if (need_paren)
++          {
++            endc = ')';
++            need_paren = 0;
++            /* If expecting more operands, then we want to see "),".  */
++            if (*str == endc && opindex_ptr[1] != 0)
++              {
++                do
++                  ++str;
++                while (ISSPACE(*str));
++                endc = ',';
++              }
++          }
++        else if ((operand->flags & PPC_OPERAND_PARENS) != 0)
++          {
++            endc = '(';
++            need_paren = 1;
++          }
++        else
++          endc = ',';
++
++        /* The call to expression should have advanced str past any
++        whitespace.  */
++        if (*str != endc
++          && (endc != ',' || *str != '\0'))
++          {
++            if (*str == '\0')
++              as_bad(_("syntax error; end of line, expected `%c'"), endc);
++            else
++              as_bad(_("syntax error; found `%c', expected `%c'"), *str, endc);
++            break;
++          }
++
++        if (*str != '\0')
++          ++str;
++        }
++
++      while (ISSPACE(*str))
++        ++str;
++
++      if (*str != '\0')
++        as_bad(_("junk at end of line: `%s'"), str);
++
++      /* Here we should have all cards in the hands:
++           1. booke instruction which we'll try to translate
++           2. array of operands with source substrings
++         Feed it to translation function and get new strings with VLE for real assembly.
++         
++         If instruction with macro substitution - provide origin name to translation function */      
++      if (macro_insn_name != NULL)
++          strcpy(new_str, macro_insn_name);
++      
++      i = (*trans_insn->translate)(insn, opcode, (const char **)literal_operands, new_str, &errmsg);
++      
++      if (errmsg != (const char *)NULL)
++        as_bad("%s", errmsg);
++      else if (i == 0)
++        as_bad(_("Can't convert '%s': no alternative"), (macro_insn_name != NULL ? macro_insn_name : opcode->name));
++
++      for(i = i; i > 0; i--) 
++        md_assemble_really(new_str);
++      
++      free(literal_operands);      
++     }
++  else
++    {      
++    /* feed md_assemble with current line as is */
++    md_assemble_really(new_str);
++    }
++
++  free(new_str);
++    
++}
++
++void
++md_assemble_really(char * str)
++{
+   char *s;
+   const struct powerpc_opcode *opcode;
+   unsigned long insn;
+diff --git a/gas/doc/c-ppc.texi b/gas/doc/c-ppc.texi
+index 7e66625..16a14ec 100644
+--- a/gas/doc/c-ppc.texi
++++ b/gas/doc/c-ppc.texi
+@@ -187,6 +187,9 @@ Do not generate code for Solaris.
+ @item -nops=@var{count}
+ If an alignment directive inserts more than @var{count} nops, put a
+ branch at the beginning to skip execution of the nops.
++
++@item -ppc_asm_to_vle
++Translate BookE instructions to VLE (requires -mvle).
+ @end table
+ @c man end
+ 
+diff --git a/gas/testsuite/gas/ppc/booke2vle.d b/gas/testsuite/gas/ppc/booke2vle.d
+new file mode 100644
+index 0000000..565ef2a
+--- /dev/null
++++ b/gas/testsuite/gas/ppc/booke2vle.d
+@@ -0,0 +1,263 @@
++#as: -mregnames -mvle -ppc_asm_to_vle
++#objdump: -dr -Mvle
++#name: Translate BookE instructions to VLE where possible
++
++.*: +file format elf.*-powerpc.*
++
++Disassembly of section \.text:
++
++
++00000000 <mark-0x8c>:
++   0:	18 00 80 00 	e_addi  r0,r0,0
++   4:	18 01 80 02 	e_addi  r0,r1,2
++   8:	18 00 90 00 	e_addic r0,r0,0
++   c:	18 01 90 02 	e_addic r0,r1,2
++  10:	18 00 98 00 	e_addic. r0,r0,0
++  14:	18 01 98 02 	e_addic. r0,r1,2
++  18:	70 00 90 00 	e_add2is r0,0
++  1c:	18 00 c8 00 	e_andi. r0,r0,0
++  20:	70 00 e8 00 	e_and2is. r0,0
++  24:	78 00 00 68 	e_b     8c <mark>
++  28:	78 00 00 65 	e_bl    8c <mark>
++  2c:	7c 00 02 02 	e_crand lt,lt,lt
++  30:	7c 01 12 02 	e_crand lt,gt,eq
++  34:	7c 00 01 02 	e_crandc lt,lt,lt
++  38:	7c 01 11 02 	e_crandc lt,gt,eq
++  3c:	7c 00 02 42 	e_crset lt
++  40:	7c 01 12 42 	e_creqv lt,gt,eq
++  44:	7c 00 02 42 	e_crset lt
++  48:	7c 21 0a 42 	e_crset gt
++  4c:	7c 00 01 c2 	e_crnand lt,lt,lt
++  50:	7c 01 11 c2 	e_crnand lt,gt,eq
++  54:	7c 00 00 42 	e_crnot lt,lt
++  58:	7c 01 10 42 	e_crnor lt,gt,eq
++  5c:	7c 00 00 42 	e_crnot lt,lt
++  60:	7c 01 08 42 	e_crnot lt,gt
++  64:	7c 00 03 82 	e_crmove lt,lt
++  68:	7c 01 13 82 	e_cror  lt,gt,eq
++  6c:	7c 00 03 82 	e_crmove lt,lt
++  70:	7c 01 0b 82 	e_crmove lt,gt
++  74:	7c 00 03 42 	e_crorc lt,lt,lt
++  78:	7c 01 13 42 	e_crorc lt,gt,eq
++  7c:	7c 00 01 82 	e_crclr lt
++  80:	7c 01 11 82 	e_crxor lt,gt,eq
++  84:	7c 00 01 82 	e_crclr lt
++  88:	7c 21 09 82 	e_crclr gt
++
++0000008c <mark>:
++  8c:	00 01       	se_isync
++  8e:	30 00 80 00 	e_lbz   r0,-32768\(0\)
++  92:	30 00 ff 80 	e_lbz   r0,-128\(0\)
++  96:	30 00 ff f1 	e_lbz   r0,-15\(0\)
++  9a:	8f 00       	se_lbz  r0,15\(r0\)
++  9c:	30 00 00 10 	e_lbz   r0,16\(0\)
++  a0:	30 00 00 11 	e_lbz   r0,17\(0\)
++  a4:	80 01       	se_lbz  r0,0\(r1\)
++  a6:	8f 01       	se_lbz  r0,15\(r1\)
++  a8:	30 01 00 10 	e_lbz   r0,16\(r1\)
++  ac:	30 01 00 11 	e_lbz   r0,17\(r1\)
++  b0:	30 01 00 7f 	e_lbz   r0,127\(r1\)
++  b4:	30 01 00 80 	e_lbz   r0,128\(r1\)
++  b8:	30 01 7f ff 	e_lbz   r0,32767\(r1\)
++  bc:	18 01 00 80 	e_lbzu  r0,-128\(r1\)
++  c0:	18 01 00 00 	e_lbzu  r0,0\(r1\)
++  c4:	18 01 00 0f 	e_lbzu  r0,15\(r1\)
++  c8:	18 01 00 10 	e_lbzu  r0,16\(r1\)
++  cc:	18 01 00 11 	e_lbzu  r0,17\(r1\)
++  d0:	18 01 00 7f 	e_lbzu  r0,127\(r1\)
++  d4:	38 01 ff fa 	e_lha   r0,-6\(r1\)
++  d8:	38 01 ff fb 	e_lha   r0,-5\(r1\)
++  dc:	38 01 ff fc 	e_lha   r0,-4\(r1\)
++  e0:	38 01 ff fd 	e_lha   r0,-3\(r1\)
++  e4:	38 01 ff fe 	e_lha   r0,-2\(r1\)
++  e8:	38 01 ff ff 	e_lha   r0,-1\(r1\)
++  ec:	38 01 00 00 	e_lha   r0,0\(r1\)
++  f0:	38 01 00 01 	e_lha   r0,1\(r1\)
++  f4:	38 01 00 02 	e_lha   r0,2\(r1\)
++  f8:	38 01 00 03 	e_lha   r0,3\(r1\)
++  fc:	38 01 00 04 	e_lha   r0,4\(r1\)
++ 100:	38 01 00 05 	e_lha   r0,5\(r1\)
++ 104:	18 01 03 fa 	e_lhau  r0,-6\(r1\)
++ 108:	18 01 03 fb 	e_lhau  r0,-5\(r1\)
++ 10c:	18 01 03 fc 	e_lhau  r0,-4\(r1\)
++ 110:	18 01 03 fd 	e_lhau  r0,-3\(r1\)
++ 114:	18 01 03 fe 	e_lhau  r0,-2\(r1\)
++ 118:	18 01 03 ff 	e_lhau  r0,-1\(r1\)
++ 11c:	18 01 03 00 	e_lhau  r0,0\(r1\)
++ 120:	18 01 03 01 	e_lhau  r0,1\(r1\)
++ 124:	18 01 03 02 	e_lhau  r0,2\(r1\)
++ 128:	18 01 03 03 	e_lhau  r0,3\(r1\)
++ 12c:	18 01 03 04 	e_lhau  r0,4\(r1\)
++ 130:	18 01 03 05 	e_lhau  r0,5\(r1\)
++ 134:	58 01 ff fa 	e_lhz   r0,-6\(r1\)
++ 138:	58 01 ff fb 	e_lhz   r0,-5\(r1\)
++ 13c:	58 01 ff fc 	e_lhz   r0,-4\(r1\)
++ 140:	58 01 ff fd 	e_lhz   r0,-3\(r1\)
++ 144:	58 01 ff fe 	e_lhz   r0,-2\(r1\)
++ 148:	58 01 ff ff 	e_lhz   r0,-1\(r1\)
++ 14c:	a0 01       	se_lhz  r0,0\(r1\)
++ 14e:	58 01 00 01 	e_lhz   r0,1\(r1\)
++ 152:	a1 01       	se_lhz  r0,2\(r1\)
++ 154:	58 01 00 03 	e_lhz   r0,3\(r1\)
++ 158:	a2 01       	se_lhz  r0,4\(r1\)
++ 15a:	58 01 00 05 	e_lhz   r0,5\(r1\)
++ 15e:	a3 01       	se_lhz  r0,6\(r1\)
++ 160:	58 01 00 07 	e_lhz   r0,7\(r1\)
++ 164:	a4 01       	se_lhz  r0,8\(r1\)
++ 166:	58 01 00 09 	e_lhz   r0,9\(r1\)
++ 16a:	a5 01       	se_lhz  r0,10\(r1\)
++ 16c:	58 01 00 0b 	e_lhz   r0,11\(r1\)
++ 170:	a6 01       	se_lhz  r0,12\(r1\)
++ 172:	58 01 00 0d 	e_lhz   r0,13\(r1\)
++ 176:	a7 01       	se_lhz  r0,14\(r1\)
++ 178:	58 01 00 0f 	e_lhz   r0,15\(r1\)
++ 17c:	a8 01       	se_lhz  r0,16\(r1\)
++ 17e:	58 01 00 11 	e_lhz   r0,17\(r1\)
++ 182:	a9 01       	se_lhz  r0,18\(r1\)
++ 184:	58 01 00 13 	e_lhz   r0,19\(r1\)
++ 188:	aa 01       	se_lhz  r0,20\(r1\)
++ 18a:	58 01 00 15 	e_lhz   r0,21\(r1\)
++ 18e:	ab 01       	se_lhz  r0,22\(r1\)
++ 190:	58 01 00 17 	e_lhz   r0,23\(r1\)
++ 194:	ac 01       	se_lhz  r0,24\(r1\)
++ 196:	58 01 00 19 	e_lhz   r0,25\(r1\)
++ 19a:	ad 01       	se_lhz  r0,26\(r1\)
++ 19c:	58 01 00 1b 	e_lhz   r0,27\(r1\)
++ 1a0:	ae 01       	se_lhz  r0,28\(r1\)
++ 1a2:	58 01 00 1d 	e_lhz   r0,29\(r1\)
++ 1a6:	af 01       	se_lhz  r0,30\(r1\)
++ 1a8:	58 01 00 1f 	e_lhz   r0,31\(r1\)
++ 1ac:	58 01 00 20 	e_lhz   r0,32\(r1\)
++ 1b0:	58 01 00 21 	e_lhz   r0,33\(r1\)
++ 1b4:	18 01 01 fa 	e_lhzu  r0,-6\(r1\)
++ 1b8:	18 01 01 fb 	e_lhzu  r0,-5\(r1\)
++ 1bc:	18 01 01 fc 	e_lhzu  r0,-4\(r1\)
++ 1c0:	18 01 01 fd 	e_lhzu  r0,-3\(r1\)
++ 1c4:	18 01 01 fe 	e_lhzu  r0,-2\(r1\)
++ 1c8:	18 01 01 ff 	e_lhzu  r0,-1\(r1\)
++ 1cc:	18 01 01 00 	e_lhzu  r0,0\(r1\)
++ 1d0:	18 01 01 01 	e_lhzu  r0,1\(r1\)
++ 1d4:	18 01 01 02 	e_lhzu  r0,2\(r1\)
++ 1d8:	18 01 01 03 	e_lhzu  r0,3\(r1\)
++ 1dc:	18 01 01 04 	e_lhzu  r0,4\(r1\)
++ 1e0:	18 01 01 05 	e_lhzu  r0,5\(r1\)
++ 1e4:	71 20 00 01 	e_li    r9,1
++ 1e8:	71 20 e0 01 	e_lis   r9,1
++ 1ec:	18 20 08 00 	e_lmw   r1,0\(0\)
++ 1f0:	19 28 08 00 	e_lmw   r9,0\(r8\)
++ 1f4:	c0 01       	se_lwz  r0,0\(r1\)
++ 1f6:	18 01 02 00 	e_lwzu  r0,0\(r1\)
++ 1fa:	01 10       	se_mr   r0,r1
++ 1fc:	01 11       	se_mr   r1,r1
++ 1fe:	01 12       	se_mr   r2,r1
++ 200:	01 13       	se_mr   r3,r1
++ 202:	01 14       	se_mr   r4,r1
++ 204:	01 15       	se_mr   r5,r1
++ 206:	01 16       	se_mr   r6,r1
++ 208:	01 17       	se_mr   r7,r1
++ 20a:	01 18       	se_mr   r24,r1
++ 20c:	01 19       	se_mr   r25,r1
++ 20e:	01 1a       	se_mr   r26,r1
++ 210:	01 1b       	se_mr   r27,r1
++ 212:	01 1c       	se_mr   r28,r1
++ 214:	01 1d       	se_mr   r29,r1
++ 216:	01 1e       	se_mr   r30,r1
++ 218:	01 1f       	se_mr   r31,r1
++ 21a:	00 09       	se_rfci
++ 21c:	00 02       	se_sc
++ 21e:	34 00 80 00 	e_stb   r0,-32768\(0\)
++ 222:	34 00 ff 80 	e_stb   r0,-128\(0\)
++ 226:	34 00 ff f1 	e_stb   r0,-15\(0\)
++ 22a:	9f 00       	se_stb  r0,15\(r0\)
++ 22c:	34 00 00 10 	e_stb   r0,16\(0\)
++ 230:	34 00 00 11 	e_stb   r0,17\(0\)
++ 234:	90 01       	se_stb  r0,0\(r1\)
++ 236:	9f 01       	se_stb  r0,15\(r1\)
++ 238:	34 01 00 10 	e_stb   r0,16\(r1\)
++ 23c:	34 01 00 11 	e_stb   r0,17\(r1\)
++ 240:	34 01 00 7f 	e_stb   r0,127\(r1\)
++ 244:	34 01 00 80 	e_stb   r0,128\(r1\)
++ 248:	34 01 7f ff 	e_stb   r0,32767\(r1\)
++ 24c:	18 01 04 80 	e_stbu  r0,-128\(r1\)
++ 250:	18 01 04 00 	e_stbu  r0,0\(r1\)
++ 254:	18 01 04 0f 	e_stbu  r0,15\(r1\)
++ 258:	18 01 04 10 	e_stbu  r0,16\(r1\)
++ 25c:	18 01 04 11 	e_stbu  r0,17\(r1\)
++ 260:	18 01 04 7f 	e_stbu  r0,127\(r1\)
++ 264:	5c 01 ff fa 	e_sth   r0,-6\(r1\)
++ 268:	5c 01 ff fb 	e_sth   r0,-5\(r1\)
++ 26c:	5c 01 ff fc 	e_sth   r0,-4\(r1\)
++ 270:	5c 01 ff fd 	e_sth   r0,-3\(r1\)
++ 274:	5c 01 ff fe 	e_sth   r0,-2\(r1\)
++ 278:	5c 01 ff ff 	e_sth   r0,-1\(r1\)
++ 27c:	b0 01       	se_sth  r0,0\(r1\)
++ 27e:	5c 01 00 01 	e_sth   r0,1\(r1\)
++ 282:	b1 01       	se_sth  r0,2\(r1\)
++ 284:	5c 01 00 03 	e_sth   r0,3\(r1\)
++ 288:	b2 01       	se_sth  r0,4\(r1\)
++ 28a:	5c 01 00 05 	e_sth   r0,5\(r1\)
++ 28e:	18 01 05 fa 	e_sthu  r0,-6\(r1\)
++ 292:	18 01 05 fb 	e_sthu  r0,-5\(r1\)
++ 296:	18 01 05 fc 	e_sthu  r0,-4\(r1\)
++ 29a:	18 01 05 fd 	e_sthu  r0,-3\(r1\)
++ 29e:	18 01 05 fe 	e_sthu  r0,-2\(r1\)
++ 2a2:	18 01 05 ff 	e_sthu  r0,-1\(r1\)
++ 2a6:	18 01 05 00 	e_sthu  r0,0\(r1\)
++ 2aa:	18 01 05 01 	e_sthu  r0,1\(r1\)
++ 2ae:	18 01 05 02 	e_sthu  r0,2\(r1\)
++ 2b2:	18 01 05 03 	e_sthu  r0,3\(r1\)
++ 2b6:	18 01 05 04 	e_sthu  r0,4\(r1\)
++ 2ba:	18 01 05 05 	e_sthu  r0,5\(r1\)
++ 2be:	18 01 09 00 	e_stmw  r0,0\(r1\)
++ 2c2:	d0 01       	se_stw  r0,0\(r1\)
++ 2c4:	d0 f1       	se_stw  r31,0\(r1\)
++ 2c6:	57 e1 00 01 	e_stw   r31,1\(r1\)
++ 2ca:	57 e1 00 02 	e_stw   r31,2\(r1\)
++ 2ce:	57 e1 00 03 	e_stw   r31,3\(r1\)
++ 2d2:	d1 f1       	se_stw  r31,4\(r1\)
++ 2d4:	57 e1 00 05 	e_stw   r31,5\(r1\)
++ 2d8:	57 e1 00 06 	e_stw   r31,6\(r1\)
++ 2dc:	57 e1 00 07 	e_stw   r31,7\(r1\)
++ 2e0:	d2 f1       	se_stw  r31,8\(r1\)
++ 2e2:	57 e1 00 09 	e_stw   r31,9\(r1\)
++ 2e6:	57 e1 00 0a 	e_stw   r31,10\(r1\)
++ 2ea:	57 e1 00 0b 	e_stw   r31,11\(r1\)
++ 2ee:	d3 f1       	se_stw  r31,12\(r1\)
++ 2f0:	57 e1 00 0d 	e_stw   r31,13\(r1\)
++ 2f4:	57 e1 00 0e 	e_stw   r31,14\(r1\)
++ 2f8:	57 e1 00 0f 	e_stw   r31,15\(r1\)
++ 2fc:	d4 f1       	se_stw  r31,16\(r1\)
++ 2fe:	57 e1 00 11 	e_stw   r31,17\(r1\)
++ 302:	57 e1 00 12 	e_stw   r31,18\(r1\)
++ 306:	57 e1 00 13 	e_stw   r31,19\(r1\)
++ 30a:	d5 f1       	se_stw  r31,20\(r1\)
++ 30c:	57 e1 00 15 	e_stw   r31,21\(r1\)
++ 310:	57 e1 00 16 	e_stw   r31,22\(r1\)
++ 314:	57 e1 00 17 	e_stw   r31,23\(r1\)
++ 318:	d6 f1       	se_stw  r31,24\(r1\)
++ 31a:	57 e1 00 19 	e_stw   r31,25\(r1\)
++ 31e:	57 e1 00 1a 	e_stw   r31,26\(r1\)
++ 322:	57 e1 00 1b 	e_stw   r31,27\(r1\)
++ 326:	d7 f1       	se_stw  r31,28\(r1\)
++ 328:	57 e1 00 1d 	e_stw   r31,29\(r1\)
++ 32c:	57 e1 00 1e 	e_stw   r31,30\(r1\)
++ 330:	57 e1 00 1f 	e_stw   r31,31\(r1\)
++ 334:	d8 f1       	se_stw  r31,32\(r1\)
++ 336:	57 e1 00 21 	e_stw   r31,33\(r1\)
++ 33a:	57 e1 00 22 	e_stw   r31,34\(r1\)
++ 33e:	18 01 06 00 	e_stwu  r0,0\(r1\)
++ 342:	18 21 06 e0 	e_stwu  r1,-32\(r1\)
++ 346:	18 21 06 80 	e_stwu  r1,-128\(r1\)
++ 34a:	24 00       	se_subi r0,1
++ 34c:	18 01 84 ff 	e_addi  r0,r1,-1
++ 350:	18 01 b0 00 	e_subfic r0,r1,0
++ 354:	18 00 90 00 	e_addic r0,r0,0
++ 358:	18 00 94 ff 	e_addic r0,r0,-1
++ 35c:	18 01 90 00 	e_addic r0,r1,0
++ 360:	18 01 94 ff 	e_addic r0,r1,-1
++ 364:	18 00 98 00 	e_addic. r0,r0,0
++ 368:	18 00 9c ff 	e_addic. r0,r0,-1
++ 36c:	18 01 98 00 	e_addic. r0,r1,0
++ 370:	18 01 9c ff 	e_addic. r0,r1,-1
++ 374:	18 00 e0 01 	e_xori  r0,r0,1
++ 378:	7c 00 04 ac 	msync
+\ No newline at end of file
+diff --git a/gas/testsuite/gas/ppc/booke2vle.s b/gas/testsuite/gas/ppc/booke2vle.s
+new file mode 100644
+index 0000000..b92a90e
+--- /dev/null
++++ b/gas/testsuite/gas/ppc/booke2vle.s
+@@ -0,0 +1,305 @@
++# Translate BookE instructions to VLE where possibale
++#as: -mvle -mppc_asm_to_vle
++	.text
++
++	addi    r0, r0, 0
++	addi    r0, r1, 2
++
++	addic   r0, r0, 0
++	addic   r0, r1, 2
++
++	addic.  r0, r0, 0
++	addic.  r0, r1, 2
++
++	addis   r0, 0x0, 0
++
++	andi.   r0, 0x0, 0
++
++	andis.  r0, 0x0, 0
++
++	b       mark
++
++	bl      mark
++
++	crand   0x0, 0x0, 0x0
++	crand   0x0, 0x1, 0x2
++
++	crandc  0x0, 0x0, 0x0
++	crandc  0x0, 0x1, 0x2
++
++	creqv   0x0, 0x0, 0x0
++	creqv   0x0, 0x1, 0x2
++
++	crset   0x0
++	crset   0x1
++
++	crnand  0x0, 0x0, 0x0
++	crnand  0x0, 0x1, 0x2
++
++	crnor   0x0, 0x0, 0x0
++	crnor   0x0, 0x1, 0x2
++
++	crnot   0x0, 0x0
++	crnot   0x0, 0x1
++
++	cror    0x0, 0x0, 0x0
++	cror    0x0, 0x1, 0x2
++
++	crmove  0x0, 0x0
++	crmove  0x0, 0x1
++
++	crorc   0x0, 0x0, 0x0
++	crorc   0x0, 0x1, 0x2
++
++	crxor   0x0, 0x0, 0x0
++	crxor   0x0, 0x1, 0x2
++
++	crclr   0x0
++	crclr   0x1
++
++mark:
++	isync
++
++	lbz     r0, -32768(r0)
++	lbz     r0,   -128(r0)
++	lbz     r0,    -15(r0)
++	lbz     r0,     15(r0)
++	lbz     r0,     16(r0)
++	lbz     r0,     17(r0)
++	lbz     r0,      0(r1)
++	lbz     r0,     15(r1)
++	lbz     r0,     16(r1)
++	lbz     r0,     17(r1)
++	lbz     r0,    127(r1)
++	lbz     r0,    128(r1)
++	lbz     r0,  32767(r1)
++
++	lbzu    r0, -128(r1)
++	lbzu    r0,    0(r1)
++	lbzu    r0,   15(r1)
++	lbzu    r0,   16(r1)
++	lbzu    r0,   17(r1)
++	lbzu    r0,  127(r1)
++
++	lha     r0, -6(r1)
++	lha     r0, -5(r1)
++	lha     r0, -4(r1)
++	lha     r0, -3(r1)
++	lha     r0, -2(r1)
++	lha     r0, -1(r1)
++	lha     r0,  0(r1)
++	lha     r0,  1(r1)
++	lha     r0,  2(r1)
++	lha     r0,  3(r1)
++	lha     r0,  4(r1)
++	lha     r0,  5(r1)
++
++	lhau    r0, -6(r1)
++	lhau    r0, -5(r1)
++	lhau    r0, -4(r1)
++	lhau    r0, -3(r1)
++	lhau    r0, -2(r1)
++	lhau    r0, -1(r1)
++	lhau    r0,  0(r1)
++	lhau    r0,  1(r1)
++	lhau    r0,  2(r1)
++	lhau    r0,  3(r1)
++	lhau    r0,  4(r1)
++	lhau    r0,  5(r1)
++
++	lhz     r0, -6(r1)
++	lhz     r0, -5(r1)
++	lhz     r0, -4(r1)
++	lhz     r0, -3(r1)
++	lhz     r0, -2(r1)
++	lhz     r0, -1(r1)
++	lhz     r0,  0(r1)
++	lhz     r0,  1(r1)
++	lhz     r0,  2(r1)
++	lhz     r0,  3(r1)
++	lhz     r0,  4(r1)
++	lhz     r0,  5(r1)
++	lhz     r0,  6(r1)
++	lhz     r0,  7(r1)
++	lhz     r0,  8(r1)
++	lhz     r0,  9(r1)
++	lhz     r0, 10(r1)
++	lhz     r0, 11(r1)
++	lhz     r0, 12(r1)
++	lhz     r0, 13(r1)
++	lhz     r0, 14(r1)
++	lhz     r0, 15(r1)
++	lhz     r0, 16(r1)
++	lhz     r0, 17(r1)
++	lhz     r0, 18(r1)
++	lhz     r0, 19(r1)
++	lhz     r0, 20(r1)
++	lhz     r0, 21(r1)
++	lhz     r0, 22(r1)
++	lhz     r0, 23(r1)
++	lhz     r0, 24(r1)
++	lhz     r0, 25(r1)
++	lhz     r0, 26(r1)
++	lhz     r0, 27(r1)
++	lhz     r0, 28(r1)
++	lhz     r0, 29(r1)
++	lhz     r0, 30(r1)
++	lhz     r0, 31(r1)
++	lhz     r0, 32(r1)
++	lhz     r0, 33(r1)
++
++	lhzu    r0, -6(r1)
++	lhzu    r0, -5(r1)
++	lhzu    r0, -4(r1)
++	lhzu    r0, -3(r1)
++	lhzu    r0, -2(r1)
++	lhzu    r0, -1(r1)
++	lhzu    r0,  0(r1)
++	lhzu    r0,  1(r1)
++	lhzu    r0,  2(r1)
++	lhzu    r0,  3(r1)
++	lhzu    r0,  4(r1)
++	lhzu    r0,  5(r1)
++
++	li      r9, 1
++
++	lis     r9, 1
++
++	lmw   r1, 0x0(r0)
++	lmw   r9, 0x0(r8)
++
++	lwz   r0, 0x0(r1)
++
++	lwzu  r0, 0x0(r1)
++
++
++;# mr actually is VLE instruction, but we can use se_mr
++	mr      r0,  r1
++	mr      r1,  r1
++	mr      r2,  r1
++	mr      r3,  r1
++	mr      r4,  r1
++	mr      r5,  r1
++	mr      r6,  r1
++	mr      r7,  r1
++	mr      r24, r1
++	mr      r25, r1
++	mr      r26, r1
++	mr      r27, r1
++	mr      r28, r1
++	mr      r29, r1
++	mr      r30, r1
++	mr      r31, r1
++
++	rfci
++
++	sc
++
++	stb     r0, -32768(r0)
++	stb     r0,   -128(r0)
++	stb     r0,    -15(r0)
++	stb     r0,     15(r0)
++	stb     r0,     16(r0)
++	stb     r0,     17(r0)
++	stb     r0,      0(r1)
++	stb     r0,     15(r1)
++	stb     r0,     16(r1)
++	stb     r0,     17(r1)
++	stb     r0,    127(r1)
++	stb     r0,    128(r1)
++	stb     r0,  32767(r1)
++
++	stbu    r0, -128(r1)
++	stbu    r0,    0(r1)
++	stbu    r0,   15(r1)
++	stbu    r0,   16(r1)
++	stbu    r0,   17(r1)
++	stbu    r0,  127(r1)
++
++	sth     r0, -6(r1)
++	sth     r0, -5(r1)
++	sth     r0, -4(r1)
++	sth     r0, -3(r1)
++	sth     r0, -2(r1)
++	sth     r0, -1(r1)
++	sth     r0,  0(r1)
++	sth     r0,  1(r1)
++	sth     r0,  2(r1)
++	sth     r0,  3(r1)
++	sth     r0,  4(r1)
++	sth     r0,  5(r1)
++
++	sthu    r0, -6(r1)
++	sthu    r0, -5(r1)
++	sthu    r0, -4(r1)
++	sthu    r0, -3(r1)
++	sthu    r0, -2(r1)
++	sthu    r0, -1(r1)
++	sthu    r0,  0(r1)
++	sthu    r0,  1(r1)
++	sthu    r0,  2(r1)
++	sthu    r0,  3(r1)
++	sthu    r0,  4(r1)
++	sthu    r0,  5(r1)
++
++	stmw    r0, 0x0(r1)
++
++	stw     r0,   0(r1)
++	stw     r31,  0(r1)
++	stw     r31,  1(r1)
++	stw     r31,  2(r1)
++	stw     r31,  3(r1)
++	stw     r31,  4(r1)
++	stw     r31,  5(r1)
++	stw     r31,  6(r1)
++	stw     r31,  7(r1)
++	stw     r31,  8(r1)
++	stw     r31,  9(r1)
++	stw     r31, 10(r1)
++	stw     r31, 11(r1)
++	stw     r31, 12(r1)
++	stw     r31, 13(r1)
++	stw     r31, 14(r1)
++	stw     r31, 15(r1)
++	stw     r31, 16(r1)
++	stw     r31, 17(r1)
++	stw     r31, 18(r1)
++	stw     r31, 19(r1)
++	stw     r31, 20(r1)
++	stw     r31, 21(r1)
++	stw     r31, 22(r1)
++	stw     r31, 23(r1)
++	stw     r31, 24(r1)
++	stw     r31, 25(r1)
++	stw     r31, 26(r1)
++	stw     r31, 27(r1)
++	stw     r31, 28(r1)
++	stw     r31, 29(r1)
++	stw     r31, 30(r1)
++	stw     r31, 31(r1)
++	stw     r31, 32(r1)
++	stw     r31, 33(r1)
++	stw     r31, 34(r1)
++
++	stwu    r0,    0(r1)
++	stwu    r1,  -32(r1)
++	stwu    r1, -128(r1)
++
++	subi    r0, r0, 1
++	subi    r0, r1, 1
++
++	subfic  r0, r1, 0x0
++
++	subic r0, r0, 0
++	subic r0, r0, 1
++	subic r0, r1, 0
++	subic r0, r1, 1
++
++	subic. r0, r0, 0
++	subic. r0, r0, 1
++	subic. r0, r1, 0
++	subic. r0, r1, 1
++
++	xori    r0, r0, 0x1
++
++	msync
+diff --git a/gas/testsuite/gas/ppc/ppc.exp b/gas/testsuite/gas/ppc/ppc.exp
+index 4c43377..9e07e1b 100644
+--- a/gas/testsuite/gas/ppc/ppc.exp
++++ b/gas/testsuite/gas/ppc/ppc.exp
+@@ -71,7 +71,7 @@ if { [istarget powerpc*-*-*] } then {
+ 	    run_dump_test "spe"
+ 	    run_dump_test "e200z4_decorated"
+ 	    run_dump_test "e200z4_decorated_booke"
+-
++	    run_dump_test "booke2vle"
+ 	    setup_xfail "*-*-*"
+ 	    run_dump_test "spe_ambiguous"
+ 	}
+diff --git a/include/opcode/ppc.h b/include/opcode/ppc.h
+index 475b121..5c68de5 100644
+--- a/include/opcode/ppc.h
++++ b/include/opcode/ppc.h
+@@ -479,6 +479,21 @@ ppc_optional_operand_value (const struct powerpc_operand *operand)
+ #define E_CMPH16I_INSN		0x7000B000
+ #define E_CMPHL16I_INSN		0x7000B800
+ 
++
++struct ppc_translate
++{
++  /* The opcode name.  */
++  const char *name;
++  
++  /* Booke to VLE translation hook */
++  int (*translate) (unsigned long insn, const struct powerpc_opcode * opcode, 
++                    const char **literal_operands, char * output_string, const char **errmsg);
++  
++};
++
++extern const struct ppc_translate ppc_booke2vle[];
++extern const int ppc_num_booke2vle;
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/opcodes/ppc-opc.c b/opcodes/ppc-opc.c
+index 9957756..58a899f 100644
+--- a/opcodes/ppc-opc.c
++++ b/opcodes/ppc-opc.c
+@@ -135,6 +135,87 @@ static unsigned long insert_off_lsp (unsigned long, long, ppc_cpu_t, const char
+ static unsigned long insert_off_spe2 (unsigned long, long, ppc_cpu_t, const char **);
+ static unsigned long insert_Ddd (unsigned long, long, ppc_cpu_t, const char **);
+ static long extract_Ddd (unsigned long, ppc_cpu_t, int *);
++
++/* Auxiliary functions from GCC MD for RS6000 */
++#define TARGET_32BIT 1
++#define HOST_WIDE_INT long
++typedef unsigned char bool;
++#define true (1==1)
++#define false (!true)
++
++/* from predicates.md */
++static bool vle_reg_operand (HOST_WIDE_INT reg);
++
++/* from rs6000.c */
++static bool valid_sci8_immediate (HOST_WIDE_INT ival);
++
++/* from constarints.md */
++static bool satisfies_constraint_I (HOST_WIDE_INT ival);
++static bool satisfies_constraint_K (HOST_WIDE_INT ival);
++static bool satisfies_constraint_L (HOST_WIDE_INT ival);
++static bool satisfies_constraint_kli20 (HOST_WIDE_INT ival);
++static bool satisfies_constraint_kmsd4 (HOST_WIDE_INT ival);
++static bool satisfies_constraint_kmmd8 (HOST_WIDE_INT ival);
++static bool satisfies_constraint_koim5 (HOST_WIDE_INT ival);
++static bool satisfies_constraint_ksci8 (HOST_WIDE_INT ival);
++static bool  satisfies_constraint_kuim5(HOST_WIDE_INT ival);
++static bool  satisfies_constraint_kuim7(HOST_WIDE_INT ival);
++
++/* Translation functions. */
++static int translate_addi (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_addic (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_addis (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_andi_dot (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_andis_dot (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_b (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_bc (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_bcl (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_blr (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_cmpi (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_cmpli (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_crxxx (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_isync (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_lbz (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_lbzu (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_lha (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_lhau (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_lhz (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_lhzu (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_li (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_lis (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_lmw (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_lwz (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_lwzu (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_mcrf (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_mfdec (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_mulli (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_mr (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_mtdec (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_nop (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_or (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_ori (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_oris (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_rfci (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_rfdi (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_rfi (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_rfmci (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_rlwimi (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_rlwinm (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_rlwnm (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_sc (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_stb (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_stbu (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_sth (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_sthu (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_stmw (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_stw (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_stwu (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_subi (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_subic (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_subis (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_subfic (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++static int translate_xori (unsigned long, const struct powerpc_opcode *, const char **, char *, const char **);
++
+ 
+ /* The operands table.
+ 
+@@ -2518,7 +2599,2197 @@ extract_Ddd (unsigned long insn,
+ {
+   return ((insn >> 11) & 0x3) | ((insn << 2) & 0x4);
+ }
+-
++
++
++/* Auxiliary functions */
++static bool
++vle_reg_operand (HOST_WIDE_INT reg)
++{
++  if((reg >= 0 && reg <= 7) || (reg >= 24 && reg <= 31))
++    return true;
++  else
++    return false;
++}
++
++/* Check if IVAL can be SCI8-encoded.  According to VLEPEM immediates
++   such encoded are 32-bit words, hence we allow zero-extended 32-bit
++   values universally and then sign-extended 32-bit values on 32-bit
++   targets only as they will truncate the operation performed to 32
++   bits anyway.  */
++
++static bool
++valid_sci8_immediate (HOST_WIDE_INT ival)
++{
++  if ((ival & ~(unsigned HOST_WIDE_INT) 0xffffffff) == 0
++      || (TARGET_32BIT
++          && ((ival & ~(unsigned HOST_WIDE_INT) 0x7fffffff)
++              == ~(unsigned HOST_WIDE_INT) 0x7fffffff)))
++    {
++      unsigned int ival32 = ival & 0xffffffff;
++      
++      if ((ival32 & 0x000000ff) == ival32)
++        return true;
++      if ((ival32 & 0x0000ff00) == ival32)
++        return true;
++      if ((ival32 & 0x00ff0000) == ival32)
++        return true;
++      if ((ival32 & 0xff000000) == ival32)
++        return true;
++      
++      if ((ival32 | 0xffffff00) == ival32)
++        return true;
++      if ((ival32 | 0xffff00ff) == ival32)
++        return true;
++      if ((ival32 | 0xff00ffff) == ival32)
++        return true;
++      if ((ival32 | 0x00ffffff) == ival32)
++        return true;
++    }
++  return false;
++}
++
++static bool
++satisfies_constraint_I (HOST_WIDE_INT ival)
++{
++  /* "A signed 16-bit constant" */
++  if((unsigned HOST_WIDE_INT) (ival + 0x8000) < 0x10000)
++    return true;
++  else
++    return false;
++
++}
++
++static bool
++satisfies_constraint_K (HOST_WIDE_INT ival)
++{
++  /* low-order 16 bits nonzero */ 
++  if((ival & (~ (HOST_WIDE_INT) 0xffff)) == 0)
++    return true;
++   else
++    return false; 
++}
++
++static bool
++satisfies_constraint_L (HOST_WIDE_INT ival)
++{
++  /* "signed 16-bit constant shifted left 16 bits" */
++  if ((ival & 0xffff) == 0 && 
++      (ival >> 31 == -1 || ival >> 31 == 0))
++    {
++    return true;
++    }
++  else
++    return false;
++  
++}
++
++static bool
++satisfies_constraint_kli20 (HOST_WIDE_INT ival)
++{
++  /* "A signed 20-bit immediate" */
++  if (ival >= -524288 && ival <= 524287)
++    return true;
++  else
++    return false;
++}
++
++static bool
++satisfies_constraint_kmsd4 (HOST_WIDE_INT ival)
++{
++  if ((ival & (~(HOST_WIDE_INT)0xf)) == 0)
++    return true;
++  else
++    return false;
++}
++
++
++static bool
++satisfies_constraint_kmmd8 (HOST_WIDE_INT ival)
++{
++  /* "An 8-bit signed immediate" */
++  if (ival >= -128 && ival < 128)
++    return true;
++  else
++    return false;
++}
++
++
++static bool
++satisfies_constraint_koim5 (HOST_WIDE_INT ival)
++{
++  /* "A constant in the range 1-32" */
++  if (ival >= 1 && ival <= 32)
++    return true;
++  else
++    return false;
++}
++
++static bool
++satisfies_constraint_ksci8 (HOST_WIDE_INT ival)
++{
++  /* "An eight bit immediate constant shifted left by 0, 1, 2 or 3 bytes" */ 
++  if (valid_sci8_immediate(ival))
++    return true;
++  else
++    return false; 
++}
++
++static bool
++satisfies_constraint_kuim5(HOST_WIDE_INT ival)
++{
++  /* "A constant in the range 0-31" */
++  if (ival >= 0 && ival <= 31)
++    return true;
++  else
++    return false;
++}
++
++static bool
++satisfies_constraint_kuim7(HOST_WIDE_INT ival)
++{
++  /* "A constant in the range 0-127" */
++  if (ival >= 0 && ival <= 127)
++    return true;
++  else
++    return false;
++}
++
++
++/* Translation functions */
++
++static int translate_addi (unsigned long insn, const struct powerpc_opcode * opcode, const char **literal_operands, char * output_string, const char **errmsg ATTRIBUTE_UNUSED)
++{
++  int n_new_lines = 0;
++  const struct powerpc_operand *operand;
++  unsigned long RT_op, RA_op;
++  short SI_op;
++
++  /* addi RT, RA0, SI */
++  operand = &powerpc_operands[opcode->operands[0]];
++  RT_op = (insn >> operand->shift) & operand->bitm;
++
++  operand = &powerpc_operands[opcode->operands[1]];
++  RA_op = (insn >> operand->shift) & operand->bitm;
++
++  operand = &powerpc_operands[opcode->operands[2]];
++  SI_op = (short)(insn >> operand->shift) & operand->bitm;
++
++  if (RT_op == RA_op && vle_reg_operand(RT_op) && satisfies_constraint_koim5(SI_op))
++    {
++      /* se_addi RX, OIMM5
++       * where RT -> RX, SI -> OIMM5  */
++      sprintf(output_string, "se_addi %s,%s", literal_operands[RT], literal_operands[SI]);
++      n_new_lines = 1;
++    }
++  else if ( satisfies_constraint_ksci8(SI_op) )
++    {
++      /* e_addi RT, RA, SCLSCI8
++       * where RT -> RT, RA0 -> RA, SI -> SCLSCI8 */
++      sprintf(output_string, "e_addi %s,%s,%s", literal_operands[RT],
++              literal_operands[RA0], literal_operands[SI]);
++      n_new_lines = 1;
++    }
++  else if (satisfies_constraint_I(SI_op))
++   {
++      /* e_add16i RT, RA, SI
++       * where RT -> RT, RA0 -> RA, SI -> SI */
++      sprintf(output_string, "e_add16i %s,%s,%s", literal_operands[RT],
++              literal_operands[RA0], literal_operands[SI]);
++      n_new_lines = 1;
++   }
++
++  return n_new_lines;
++}
++
++static int translate_addic (unsigned long insn, const struct powerpc_opcode * opcode, const char **literal_operands, char * output_string, const char **errmsg ATTRIBUTE_UNUSED)
++{
++  int n_new_lines = 0;
++  const struct powerpc_operand *operand;
++  unsigned long RT_op ATTRIBUTE_UNUSED, RA_op ATTRIBUTE_UNUSED;
++  short SI_op;
++
++  /* addic RT, RA, SI */
++  /* addic. RT, RA, SI */
++  operand = &powerpc_operands[opcode->operands[0]];
++  RT_op = (insn >> operand->shift) & operand->bitm;
++
++  operand = &powerpc_operands[opcode->operands[1]];
++  RA_op = (insn >> operand->shift) & operand->bitm;
++
++  operand = &powerpc_operands[opcode->operands[2]];
++  SI_op = (short)(insn >> operand->shift) & operand->bitm;
++
++  if (satisfies_constraint_ksci8(SI_op))
++    {
++      if (strcmp (opcode->name, "addic") == 0)
++        {
++         /* e_addic RT, RA, SCLSCI8
++          * where RT -> RT, RA -> RA, SI -> SCLSCI8 */
++          sprintf(output_string, "e_addic %s,%s,%s", literal_operands[RT],
++                  literal_operands[RA], literal_operands[SI]);
++        }
++      else /* addic. */
++        {
++          /* e_addic. RT, RA, SCLSCI8
++          * where RT -> RT, RA -> RA, SI -> SCLSCI8 */
++          sprintf(output_string, "e_addic. %s,%s,%s", literal_operands[RT],
++                  literal_operands[RA], literal_operands[SI]);
++        }
++      n_new_lines = 1;
++    }
++
++  return n_new_lines;
++}
++
++static int translate_addis (unsigned long insn, const struct powerpc_opcode * opcode, const char **literal_operands, char * output_string, const char **errmsg ATTRIBUTE_UNUSED)
++{
++  int n_new_lines = 0;
++  const struct powerpc_operand *operand;
++  unsigned long RT_op, RA_op;
++  short SI_op;
++
++  /* addis RT, RA0, SISIGNOPT */
++  operand = &powerpc_operands[opcode->operands[0]];
++  RT_op = (insn >> operand->shift) & operand->bitm;
++  
++  operand = &powerpc_operands[opcode->operands[1]];
++  RA_op = (insn >> operand->shift) & operand->bitm;
++
++  operand = &powerpc_operands[opcode->operands[2]];
++  SI_op = (short)(insn >> operand->shift) & operand->bitm;
++
++  if (RT_op == RA_op && satisfies_constraint_L((int)SI_op << 16))
++    {
++      /* e_add2is RA, VLESIMM
++       * where RA0 -> RA, SISIGNOPT -> VLESIMM */
++      sprintf(output_string, "e_add2is %s,%s", literal_operands[RA0],
++              literal_operands[SISIGNOPT]);
++      n_new_lines = 1;
++    }
++  else if (valid_sci8_immediate((int)SI_op << 16))
++    {
++      /* e_addi RT, RA, SCLSCI8
++       * where RT -> RT, RA0 -> RA, SISIGNOPT -> SCLSCI8 */
++      sprintf(output_string, "e_addi %s,%s,%d", literal_operands[RT],
++              literal_operands[RA0], (int)(SI_op << 16));
++      n_new_lines = 1;
++    }
++
++  return n_new_lines;
++}
++
++static int translate_andi_dot (unsigned long insn, const struct powerpc_opcode * opcode, const char **literal_operands, char * output_string, const char **errmsg ATTRIBUTE_UNUSED)
++{
++  int n_new_lines = 0;
++  const struct powerpc_operand *operand;
++  unsigned long RS_op, UI_op, RA_op;
++
++  /* andi. RA, RS, UI */ 
++  operand = &powerpc_operands[opcode->operands[0]];
++  RA_op = (insn >> operand->shift) & operand->bitm; 
++  
++  operand = &powerpc_operands[opcode->operands[1]];
++  RS_op = (insn >> operand->shift) & operand->bitm; 
++  
++  operand = &powerpc_operands[opcode->operands[2]];
++  UI_op = (insn >> operand->shift) & operand->bitm;
++
++  if (satisfies_constraint_ksci8(UI_op))
++    {
++      /* e_andi. RA, RS, SCLSCI8
++       * where RA -> RA, RS -> RS, UI -> SCLSCI8 */
++      sprintf(output_string, "e_andi. %s,%s,%s", literal_operands[RA],
++              literal_operands[RS], literal_operands[UI]);
++      n_new_lines = 1;
++    }
++  else if (RS_op == RA_op && satisfies_constraint_K(UI_op))
++    {
++      /* e_and2i. RD, VLEUIMML 
++         where RA -> RD, UI -> VLEUIMML */
++      sprintf(output_string, "e_and2i. %s,%s", literal_operands[RA], literal_operands[UI]);
++      n_new_lines = 1;
++    }
++  
++  return n_new_lines;  
++}
++
++static int translate_andis_dot (unsigned long insn, const struct powerpc_opcode * opcode, const char **literal_operands, char * output_string, const char **errmsg ATTRIBUTE_UNUSED)
++{
++  int n_new_lines = 0;
++  const struct powerpc_operand *operand;
++  unsigned long RS_op, UI_op, RA_op; 
++  
++  /* andis. RA, RS, UI */
++  operand = &powerpc_operands[opcode->operands[0]];
++  RA_op = (insn >> operand->shift) & operand->bitm; 
++  
++  operand = &powerpc_operands[opcode->operands[1]];
++  RS_op = (insn >> operand->shift) & operand->bitm; 
++  
++  operand = &powerpc_operands[opcode->operands[2]];
++  UI_op = (insn >> operand->shift) & operand->bitm;
++  
++  if (RS_op == RA_op && satisfies_constraint_L(UI_op << 16))
++      {
++      /* e_and2is. RD, VLEUIMML 
++         where RA -> RD, UI -> VLEUIMML */
++      sprintf(output_string, "e_and2is. %s,%s", literal_operands[RA], literal_operands[UI]);
++      n_new_lines = 1;
++    }
++
++  return n_new_lines;  
++}
++
++static int translate_b (unsigned long insn ATTRIBUTE_UNUSED, const struct powerpc_opcode * opcode, const char **literal_operands, char * output_string, const char **errmsg ATTRIBUTE_UNUSED)
++{
++  int n_new_lines = 0;
++  
++  /* b LI */
++  
++  if (strcmp (opcode->name, "b") == 0)
++    {
++      /* e_b B24 */
++      sprintf(output_string, "e_b %s", literal_operands[LI]);
++      n_new_lines = 1;
++    }
++  else if (strcmp (opcode->name, "bl") == 0)
++    {
++      /* e_bl B24 */
++      sprintf(output_string, "e_bl %s", literal_operands[LI]);
++      n_new_lines = 1; 
++    }
++   
++  return n_new_lines;
++}
++
++static int translate_bc (unsigned long insn, const struct powerpc_opcode * opcode, const char **literal_operands, char * output_string, const char **errmsg ATTRIBUTE_UNUSED)
++{
++  int n_new_lines = 0;
++  const struct powerpc_operand *operand;
++  unsigned long CR_op, BD_op ATTRIBUTE_UNUSED; 
++ 
++  if (strcmp (opcode->name, "bc") == 0 || strcmp (opcode->name, "bc+") == 0 || strcmp (opcode->name, "bc-") == 0)
++    {
++      /* bc BO, BI, BD */
++      sprintf(output_string, "e_bc %s,%s,%s", literal_operands[BO], literal_operands[BI], literal_operands[BD]);
++      n_new_lines = 1;
++    }
++  else if (strcmp (opcode->name, "bt") == 0)
++    {
++      sprintf(output_string, "e_bt %s", literal_operands[BD]);
++      n_new_lines = 1;
++    }
++  else if (strcmp (opcode->name, "bf") == 0)
++    {
++      sprintf(output_string, "e_bf %s", literal_operands[BD]);
++      n_new_lines = 1;
++    }
++  else if (strcmp (opcode->name, "bdnz") == 0)
++    {
++      sprintf(output_string, "e_bdnz %s", literal_operands[BD]);
++      n_new_lines = 1;
++    }
++  else if (strcmp (opcode->name, "bdz") == 0)
++    {
++      sprintf(output_string, "e_bdz %s", literal_operands[BD]);
++      n_new_lines = 1;
++    }
++  else
++    {
++    /* b** CR, BD */
++    operand = &powerpc_operands[opcode->operands[0]];
++    CR_op = (insn >> operand->shift) & operand->bitm; 
++    
++    operand = &powerpc_operands[opcode->operands[1]];
++    BD_op = (insn >> operand->shift) & operand->bitm;
++      
++    /* bc extended mnemonics */
++    if ((strcmp (opcode->name, "blt") == 0 || strcmp (opcode->name, "blt+") == 0 || strcmp (opcode->name, "blt-") == 0))
++      {
++        if (CR_op == 0)
++          sprintf(output_string, "se_blt %s", literal_operands[BD]);
++        else
++          sprintf(output_string, "e_blt %s,%s", literal_operands[CR], literal_operands[BD]);
++        n_new_lines = 1;
++      }
++    else if (strcmp (opcode->name, "ble") == 0 || strcmp (opcode->name, "ble+") == 0 || strcmp (opcode->name, "ble-") == 0)
++      {
++        if (CR_op == 0)
++          sprintf(output_string, "se_ble %s", literal_operands[BD]);
++        else
++          sprintf(output_string, "e_ble %s,%s", literal_operands[CR], literal_operands[BD]);
++        n_new_lines = 1;
++      }
++    else if (strcmp (opcode->name, "beq") == 0 || strcmp (opcode->name, "beq+") == 0 || strcmp (opcode->name, "beq-") == 0)
++      {
++        if (CR_op == 0)
++          sprintf(output_string, "se_beq %s", literal_operands[BD]);
++        else
++          sprintf(output_string, "e_beq %s,%s", literal_operands[CR], literal_operands[BD]);
++        n_new_lines = 1;
++      }
++    else if (strcmp (opcode->name, "bge") == 0 || strcmp (opcode->name, "bge+") == 0 || strcmp (opcode->name, "bge-") == 0)
++      {
++        if (CR_op == 0)
++          sprintf(output_string, "se_bge %s", literal_operands[BD]);
++        else
++          sprintf(output_string, "e_bge %s,%s", literal_operands[CR], literal_operands[BD]);
++        n_new_lines = 1;
++      } 
++    else if (strcmp (opcode->name, "bgt") == 0 || strcmp (opcode->name, "bgt+") == 0 || strcmp (opcode->name, "bgt-") == 0)
++      {
++        if (CR_op == 0)
++          sprintf(output_string, "se_bgt %s", literal_operands[BD]);
++        else
++          sprintf(output_string, "e_bgt %s,%s", literal_operands[CR], literal_operands[BD]);
++        n_new_lines = 1;
++      }
++    else if (strcmp (opcode->name, "bnl") == 0 || strcmp (opcode->name, "bnl+") == 0 || strcmp (opcode->name, "bnl-") == 0)
++      {
++        if (CR_op == 0)
++          sprintf(output_string, "se_bnl %s", literal_operands[BD]);
++        else
++          sprintf(output_string, "e_bnl %s,%s", literal_operands[CR], literal_operands[BD]);
++        n_new_lines = 1;
++      }
++    else if (strcmp (opcode->name, "bne") == 0 || strcmp (opcode->name, "bne+") == 0 || strcmp (opcode->name, "bne-") == 0)
++      {
++        if (CR_op == 0)
++          sprintf(output_string, "se_bne %s", literal_operands[BD]);
++        else
++          sprintf(output_string, "e_bne %s,%s", literal_operands[CR], literal_operands[BD]);
++        n_new_lines = 1;
++      }
++    else if (strcmp (opcode->name, "bng") == 0 || strcmp (opcode->name, "bng+") == 0 || strcmp (opcode->name, "bng-") == 0)
++      {
++        if (CR_op == 0)
++          sprintf(output_string, "se_bng %s", literal_operands[BD]);
++        else
++          sprintf(output_string, "e_bng %s,%s", literal_operands[CR], literal_operands[BD]);
++        n_new_lines = 1;
++      }
++    else if (strcmp (opcode->name, "bso") == 0 || strcmp (opcode->name, "bso+") == 0 || strcmp (opcode->name, "bso-") == 0)
++      {
++        if (CR_op == 0)
++          sprintf(output_string, "se_bso %s", literal_operands[BD]);
++        else
++          sprintf(output_string, "e_bso %s,%s", literal_operands[CR], literal_operands[BD]);
++        n_new_lines = 1;
++      }
++    else if (strcmp (opcode->name, "bns") == 0 || strcmp (opcode->name, "bns+") == 0 || strcmp (opcode->name, "bns-") == 0)
++      {
++        if (CR_op == 0)
++          sprintf(output_string, "se_bns %s", literal_operands[BD]);
++        else
++          sprintf(output_string, "e_bns %s,%s", literal_operands[CR], literal_operands[BD]);
++        n_new_lines = 1;
++      }
++    else if (strcmp (opcode->name, "bun") == 0 || strcmp (opcode->name, "bun+") == 0 || strcmp (opcode->name, "bun-") == 0)
++      {
++        if (CR_op == 0)
++          sprintf(output_string, "se_bun %s", literal_operands[BD]);
++        else
++          sprintf(output_string, "e_bun %s,%s", literal_operands[CR], literal_operands[BD]);
++        n_new_lines = 1;
++      }
++    else if (strcmp (opcode->name, "bnu") == 0 || strcmp (opcode->name, "bnu+") == 0 || strcmp (opcode->name, "bnu-") == 0)
++      {
++        if (CR_op == 0)
++          sprintf(output_string, "se_bnu %s", literal_operands[BD]);
++        else
++          sprintf(output_string, "e_bnu %s,%s", literal_operands[CR], literal_operands[BD]);
++        n_new_lines = 1;
++      }
++    }
++  
++  return n_new_lines;
++}
++
++static int translate_bcl (unsigned long insn ATTRIBUTE_UNUSED, const struct powerpc_opcode * opcode, const char **literal_operands, char * output_string, const char **errmsg ATTRIBUTE_UNUSED)
++{
++  int n_new_lines = 0;
++ 
++  if (strcmp (opcode->name, "bcl") == 0 || strcmp (opcode->name, "bcl+") == 0 || strcmp (opcode->name, "bcl-") == 0)
++    {
++      /* bcl BO, BI, BD */
++      sprintf(output_string, "e_bcl %s,%s,%s", literal_operands[BO], literal_operands[BI], literal_operands[BD]);
++      n_new_lines = 1;
++    }
++  else if (strcmp (opcode->name, "btl") == 0)
++    {
++      sprintf(output_string, "e_btl %s", literal_operands[BD]);
++      n_new_lines = 1;
++    }
++  else if (strcmp (opcode->name, "bfl") == 0)
++    {
++      sprintf(output_string, "e_bfl %s", literal_operands[BD]);
++      n_new_lines = 1;
++    }
++  else if (strcmp (opcode->name, "bdnzl") == 0)
++    {
++      sprintf(output_string, "e_bdnzl %s", literal_operands[BD]);
++      n_new_lines = 1;
++    }
++  else if (strcmp (opcode->name, "bdzl") == 0)
++    {
++      sprintf(output_string, "e_bdzl %s", literal_operands[BD]);
++      n_new_lines = 1;
++    }
++  else
++    {
++    /* bl** CR, BD */
++
++    /* bl extended mnemonics */
++    if ((strcmp (opcode->name, "bltl") == 0 || strcmp (opcode->name, "bltl+") == 0 || strcmp (opcode->name, "bltl-") == 0))
++      {
++        sprintf(output_string, "e_bltl %s,%s", literal_operands[CR], literal_operands[BD]);
++        n_new_lines = 1;
++      }
++    else if (strcmp (opcode->name, "blel") == 0 || strcmp (opcode->name, "blel+") == 0 || strcmp (opcode->name, "blel-") == 0)
++      {
++        sprintf(output_string, "e_blel %s,%s", literal_operands[CR], literal_operands[BD]);
++        n_new_lines = 1;
++      }
++    else if (strcmp (opcode->name, "beql") == 0 || strcmp (opcode->name, "beql+") == 0 || strcmp (opcode->name, "beql-") == 0)
++      {
++        sprintf(output_string, "e_beql %s,%s", literal_operands[CR], literal_operands[BD]);
++        n_new_lines = 1;
++      }
++    else if (strcmp (opcode->name, "bgel") == 0 || strcmp (opcode->name, "bgel+") == 0 || strcmp (opcode->name, "bgel-") == 0)
++      {
++        sprintf(output_string, "e_bgel %s,%s", literal_operands[CR], literal_operands[BD]);
++        n_new_lines = 1;
++      } 
++    else if (strcmp (opcode->name, "bgtl") == 0 || strcmp (opcode->name, "bgtl+") == 0 || strcmp (opcode->name, "bgtl-") == 0)
++      {
++        sprintf(output_string, "e_bgtl %s,%s", literal_operands[CR], literal_operands[BD]);
++        n_new_lines = 1;
++      }
++    else if (strcmp (opcode->name, "bnll") == 0 || strcmp (opcode->name, "bnll+") == 0 || strcmp (opcode->name, "bnll-") == 0)
++      {
++        sprintf(output_string, "e_bnll %s,%s", literal_operands[CR], literal_operands[BD]);
++        n_new_lines = 1;
++      }
++    else if (strcmp (opcode->name, "bnel") == 0 || strcmp (opcode->name, "bnel+") == 0 || strcmp (opcode->name, "bnel-") == 0)
++      {
++        sprintf(output_string, "e_bnel %s,%s", literal_operands[CR], literal_operands[BD]);
++        n_new_lines = 1;
++      }
++    else if (strcmp (opcode->name, "bngl") == 0 || strcmp (opcode->name, "bngl+") == 0 || strcmp (opcode->name, "bngl-") == 0)
++      {
++        sprintf(output_string, "e_bngl %s,%s", literal_operands[CR], literal_operands[BD]);
++        n_new_lines = 1;
++      }
++    else if (strcmp (opcode->name, "bsol") == 0 || strcmp (opcode->name, "bsol+") == 0 || strcmp (opcode->name, "bsol-") == 0)
++      {
++        sprintf(output_string, "e_bsol %s,%s", literal_operands[CR], literal_operands[BD]);
++        n_new_lines = 1;
++      }
++    else if (strcmp (opcode->name, "bnsl") == 0 || strcmp (opcode->name, "bnsl+") == 0 || strcmp (opcode->name, "bnsl-") == 0)
++      {
++        sprintf(output_string, "e_bnsl %s,%s", literal_operands[CR], literal_operands[BD]);
++        n_new_lines = 1;
++      }
++    else if (strcmp (opcode->name, "bunl") == 0 || strcmp (opcode->name, "bunl+") == 0 || strcmp (opcode->name, "bunl-") == 0)
++      {
++        sprintf(output_string, "e_bunl %s,%s", literal_operands[CR], literal_operands[BD]);
++        n_new_lines = 1;
++      }
++    else if (strcmp (opcode->name, "bnul") == 0 || strcmp (opcode->name, "bnul+") == 0 || strcmp (opcode->name, "bnul-") == 0)
++      {
++        sprintf(output_string, "e_bnul %s,%s", literal_operands[CR], literal_operands[BD]);
++        n_new_lines = 1;
++      }
++    } 
++  
++  return n_new_lines;
++}
++
++static int translate_bctr (unsigned long insn ATTRIBUTE_UNUSED, const struct powerpc_opcode * opcode, const char **literal_operands ATTRIBUTE_UNUSED, char * output_string, const char **errmsg ATTRIBUTE_UNUSED)
++{
++  int n_new_lines = 0; 
++  
++  if (strcmp (opcode->name, "bctr") == 0)
++    {
++      sprintf(output_string, "se_bctr");
++      n_new_lines = 1;
++    }
++  else if (strcmp (opcode->name, "bctrl") == 0)
++    {
++      sprintf(output_string, "se_bctrl");
++      n_new_lines = 1;
++    }
++    
++  return n_new_lines;
++}
++
++static int translate_blr (unsigned long insn ATTRIBUTE_UNUSED, const struct powerpc_opcode * opcode ATTRIBUTE_UNUSED, const char **literal_operands ATTRIBUTE_UNUSED, char * output_string ATTRIBUTE_UNUSED, const char **errmsg ATTRIBUTE_UNUSED)
++{
++  int n_new_lines = 0; 
++  
++  if (strcmp (opcode->name, "blr") == 0)
++    {
++      sprintf(output_string, "se_blr");
++      n_new_lines = 1;
++    }
++  else if (strcmp (opcode->name, "blrl") == 0)
++    {
++      sprintf(output_string, "se_blrl");
++      n_new_lines = 1;
++    }
++    
++  return n_new_lines; 
++}
++
++static int translate_cmpi (unsigned long insn, const struct powerpc_opcode * opcode, const char **literal_operands, char * output_string, const char **errmsg)
++{
++  int n_new_lines = 0;
++  const struct powerpc_operand *operand;
++  unsigned long OBF_op, L_op ATTRIBUTE_UNUSED, RA_op;
++  short SI_op;
++  int BF_field = UNUSED;
++  
++  if (strcmp (opcode->name, "cmpi") == 0)
++    {
++      /* cmpi BF, L, RA, SI */
++      operand = &powerpc_operands[opcode->operands[0]];
++      OBF_op = (insn >> operand->shift) & operand->bitm;
++      
++      BF_field = BF;
++      
++      operand = &powerpc_operands[opcode->operands[1]];
++      L_op = (insn >> operand->shift) & operand->bitm;
++      
++      operand = &powerpc_operands[opcode->operands[2]];
++      RA_op = (insn >> operand->shift) & operand->bitm;
++      
++      operand = &powerpc_operands[opcode->operands[3]];
++      SI_op = (short)(insn >> operand->shift) & operand->bitm;
++    }
++  else if (strcmp (opcode->name, "cmpwi") == 0)
++    {
++      /* cmpwi OBF, RA, SI */
++      operand = &powerpc_operands[opcode->operands[0]];
++      OBF_op = (insn >> operand->shift) & operand->bitm;
++      
++      BF_field = OBF;
++      
++      operand = &powerpc_operands[opcode->operands[1]];
++      RA_op = (insn >> operand->shift) & operand->bitm;
++      
++      operand = &powerpc_operands[opcode->operands[2]];
++      SI_op = (short)(insn >> operand->shift) & operand->bitm;
++    }
++  else
++    {
++      *errmsg = _("Unrecognized 'cmpi' mnemonic");
++      return 0;
++    }
++
++  if (OBF_op == 0)
++    {
++      if (vle_reg_operand(RA_op) && satisfies_constraint_kuim5(SI_op))
++        {
++          /* se_cmpi RX, UI5 */
++          sprintf(output_string, "se_cmpi %s,%s", literal_operands[RA],
++                  literal_operands[SI]);
++          n_new_lines = 1;
++        }
++      else if (satisfies_constraint_I(SI_op))
++        {
++        /* e_cmp16i RA, VLESIMM
++        * where RA -> RA, SI -> VLESIMM */
++        sprintf(output_string, "e_cmp16i %s,%s", literal_operands[RA],
++                literal_operands[SI]);
++        n_new_lines = 1;
++        }
++    }
++  else if (satisfies_constraint_ksci8(SI_op))
++    {
++      /* e_cmpi CRD32, RA, SCLSCI8 
++      * where BF -> CRD32, RA -> RA, SI -> SCLSCI8 */
++      sprintf(output_string, "e_cmpi %s,%s,%s", literal_operands[BF_field],
++              literal_operands[RA], literal_operands[SI]);
++      n_new_lines = 1;
++    }
++
++ 
++  return n_new_lines;
++}
++
++static int translate_cmpli (unsigned long insn, const struct powerpc_opcode * opcode, const char **literal_operands, char * output_string, const char **errmsg ATTRIBUTE_UNUSED)
++{
++  int n_new_lines = 0;
++  const struct powerpc_operand *operand;
++  unsigned long BF_op, OBF_op, L_op ATTRIBUTE_UNUSED, RA_op, UISIGNOPT_op;
++  
++  
++  if (strcmp (opcode->name, "cmpli") == 0)
++    {
++      /* cmpli BF, L, RA, UISIGNOPT */
++      operand = &powerpc_operands[opcode->operands[0]];
++      BF_op = (insn >> operand->shift) & operand->bitm;
++      
++      operand = &powerpc_operands[opcode->operands[1]];
++      L_op = (insn >> operand->shift) & operand->bitm;
++      
++      operand = &powerpc_operands[opcode->operands[2]];
++      RA_op = (insn >> operand->shift) & operand->bitm;
++      
++      operand = &powerpc_operands[opcode->operands[3]];
++      UISIGNOPT_op = (insn >> operand->shift) & operand->bitm;
++      
++      if (BF_op == 0 && vle_reg_operand(RA_op) && satisfies_constraint_koim5(UISIGNOPT_op))
++        {
++          /* se_cmpli RX, OIMM5
++          * where RA -> RX, UISIGNOPT -> OIMM5 */
++          sprintf(output_string, "se_cmpli %s,%s", literal_operands[RA], literal_operands[UISIGNOPT]);
++          n_new_lines = 1;
++        } 
++      else if (satisfies_constraint_ksci8(UISIGNOPT_op))
++        {
++          /* e_cmpli CRD32, RA, SCLSCI8
++          * where BF -> CRD32, RA -> RA, SI -> SCLSCI8 */
++          sprintf(output_string, "e_cmpli %s,%s,%s", literal_operands[BF],
++                  literal_operands[RA], literal_operands[UISIGNOPT]);
++          n_new_lines = 1;
++        }      
++    }
++  else if (strcmp (opcode->name, "cmplwi") == 0)
++    {
++      /* cmplwi OBF, RA, UISIGNOPT */
++      operand = &powerpc_operands[opcode->operands[0]];
++      OBF_op = (insn >> operand->shift) & operand->bitm;
++      
++      operand = &powerpc_operands[opcode->operands[1]];
++      RA_op = (insn >> operand->shift) & operand->bitm;
++      
++      operand = &powerpc_operands[opcode->operands[2]];
++      UISIGNOPT_op = (insn >> operand->shift) & operand->bitm;
++      
++      /* check optional BF field */
++      if (OBF_op == 0)
++        {
++           if (vle_reg_operand(RA_op) && satisfies_constraint_koim5(UISIGNOPT_op))
++            {
++              /* se_cmpli RX, OIMM5 */
++              sprintf(output_string, "se_cmpli %s,%s", literal_operands[RA],
++                      literal_operands[UISIGNOPT]);
++              n_new_lines = 1;
++            }
++          else if (satisfies_constraint_I(UISIGNOPT_op))
++            {
++              /* e_cmpl16i RA, VLEUIMM
++              * where RA -> RA, SI -> VLESIMM */
++              sprintf(output_string, "e_cmpl16i %s,%s", literal_operands[RA],
++                      literal_operands[UISIGNOPT]);
++              n_new_lines = 1;
++            }
++        }
++      else if (satisfies_constraint_ksci8(UISIGNOPT_op))
++        {
++          /* e_cmpli CRD32, RA, SCLSCI8 
++          * where OBF -> CRD32, RA -> RA, SI -> SCLSCI8 */
++          sprintf(output_string, "e_cmpli %s,%s,%s", literal_operands[OBF],
++                  literal_operands[RA], literal_operands[UISIGNOPT]);
++          n_new_lines = 1;
++        }
++    }
++ 
++  return n_new_lines;
++}
++
++static int translate_crxxx (unsigned long insn, const struct powerpc_opcode * opcode, const char **literal_operands, char * output_string, const char **errmsg ATTRIBUTE_UNUSED)
++{
++  int n_new_lines = 0;
++  const struct powerpc_operand *operand;
++  unsigned long BT_op, BA_op, BB_op;
++  
++  /* crand   BT, BA, BB    */
++  /* crandc  BT, BA, BB    */
++  /* creqv   BT, BA, BB    */
++  /* crset   BT, BAT, BBA  */
++  /* crnand  BT, BA, BB    */
++  /* crnor   BT, BA, BB    */
++  /* cror    BT, BA, BB    */
++  /* crmove  BT, BA, BBA   */
++  /* crorc   BT, BA, BBA   */
++  /* crxor   BT, BA, BB    */
++  /* crclr   BT, BAT, BBA  */
++  operand = &powerpc_operands[opcode->operands[0]];
++  BT_op = (insn >> operand->shift) & operand->bitm; 
++  
++  operand = &powerpc_operands[opcode->operands[1]];
++  BA_op = (insn >> operand->shift) & operand->bitm; 
++  
++  operand = &powerpc_operands[opcode->operands[2]];
++  BB_op = (insn >> operand->shift) & operand->bitm;
++  
++    
++  if (strcmp (opcode->name, "crand") == 0)
++    {
++      /* e_crand BT, BA, BB */
++      sprintf(output_string, "e_crand %s,%s,%s", literal_operands[BT], literal_operands[BA], literal_operands[BB]);
++      n_new_lines = 1;
++    }
++  else if (strcmp (opcode->name, "crandc") == 0)
++    {
++      /* e_crandc BT, BA, BB */
++      sprintf(output_string, "e_crandc %s,%s,%s", literal_operands[BT], literal_operands[BA], literal_operands[BB]);
++      n_new_lines = 1;
++    }
++  else if (strcmp (opcode->name, "creqv") == 0)
++    {
++      if (BT_op == BA_op && BA_op == BB_op)
++        {
++          /* e_crset  BT */
++          sprintf(output_string, "e_crset %s", literal_operands[BT]);
++        }
++      else
++        {
++          /* e_creqv BT, BA, BB */
++          sprintf(output_string, "e_creqv %s,%s,%s", literal_operands[BT], literal_operands[BA], literal_operands[BB]);
++        }  
++      n_new_lines = 1;
++    }
++  else if (strcmp (opcode->name, "crset") == 0)
++    {
++      /* e_crset  BT */
++      sprintf(output_string, "e_crset %s", literal_operands[BT]);
++      n_new_lines = 1;
++    }
++  else if (strcmp (opcode->name, "crnand") == 0)
++    {
++      /* e_crnand BT, BA, BB  */
++      sprintf(output_string, "e_crnand %s,%s,%s", literal_operands[BT], literal_operands[BA], literal_operands[BB]);
++      n_new_lines = 1;
++    } 
++  else if (strcmp (opcode->name, "crnor") == 0)
++    {
++      /* e_crnor BT, BA, BB  */
++      sprintf(output_string, "e_crnor %s,%s,%s", literal_operands[BT], literal_operands[BA], literal_operands[BB]);
++      n_new_lines = 1;
++    }  
++  else if (strcmp (opcode->name, "crnot") == 0)
++    {
++      /* e_crnor BT, BA, BB  */
++      sprintf(output_string, "e_crnor %s,%s,%s", literal_operands[BT], literal_operands[BA], literal_operands[BA]);
++      n_new_lines = 1;
++    }
++  else if (strcmp (opcode->name, "cror") == 0)
++    {
++      /* e_cror BT, BA, BB  */
++      sprintf(output_string, "e_cror %s,%s,%s", literal_operands[BT], literal_operands[BA], literal_operands[BB]);
++      n_new_lines = 1;
++    } 
++  else if (strcmp (opcode->name, "crmove") == 0)
++    {
++      /* e_cror BT, BA, BB  */
++      sprintf(output_string, "e_cror %s,%s,%s", literal_operands[BT], literal_operands[BA], literal_operands[BA]);
++      n_new_lines = 1;
++    }
++  else if (strcmp (opcode->name, "crorc") == 0)
++    {
++      /* e_crorc BT, BA, BB  */
++      sprintf(output_string, "e_crorc %s,%s,%s", literal_operands[BT], literal_operands[BA], literal_operands[BB]);
++      n_new_lines = 1;
++    }
++  else if (strcmp (opcode->name, "crxor") == 0)
++    {
++      /* e_crxor BT, BA, BB  */
++      sprintf(output_string, "e_crxor %s,%s,%s", literal_operands[BT], literal_operands[BA], literal_operands[BB]);
++      n_new_lines = 1;
++    }
++  else if (strcmp (opcode->name, "crclr") == 0)
++    {
++      /* e_crxor BT, BA, BB  */
++      sprintf(output_string, "e_crxor %s,%s,%s", literal_operands[BT], literal_operands[BT], literal_operands[BT]);
++      n_new_lines = 1;
++    }
++   
++  return n_new_lines;
++}
++
++static int translate_isync (unsigned long insn ATTRIBUTE_UNUSED, const struct powerpc_opcode * opcode ATTRIBUTE_UNUSED, const char **literal_operands ATTRIBUTE_UNUSED, char * output_string, const char **errmsg ATTRIBUTE_UNUSED)
++{
++  sprintf(output_string, "se_isync");
++  
++  return 1;  
++}
++
++static int translate_lbz (unsigned long insn, const struct powerpc_opcode * opcode, const char **literal_operands, char * output_string, const char **errmsg ATTRIBUTE_UNUSED)
++{
++  int n_new_lines = 0;
++  const struct powerpc_operand *operand;
++  unsigned long RT_op, RA_op;
++  short D_op;
++  
++  /* lbz RT, D, RA0 */
++  operand = &powerpc_operands[opcode->operands[0]];
++  RT_op = (insn >> operand->shift) & operand->bitm;
++
++  operand = &powerpc_operands[opcode->operands[1]];
++  D_op = (short)(insn >> operand->shift) & operand->bitm;
++
++  operand = &powerpc_operands[opcode->operands[2]];
++  RA_op = (insn >> operand->shift) & operand->bitm;
++  
++  if (satisfies_constraint_kmsd4(D_op) && vle_reg_operand(RT_op) && vle_reg_operand(RA_op))
++    {
++      /* se_lbz RZ, SE_SD, RX
++       * where RT -> RZ, D -> SE_SD,  RA0 -> RX */
++      sprintf(output_string, "se_lbz %s,%s(%s)", literal_operands[RT],
++              literal_operands[D], literal_operands[RA0]);
++      n_new_lines = 1;
++    }
++  else if (satisfies_constraint_I(D_op))
++    {
++      /* e_lbz RT, D, RA0
++       * where RT -> RT, D -> D, RA0 -> RA0 */
++      sprintf(output_string, "e_lbz %s,%s(%s)", literal_operands[RT],
++              literal_operands[D], literal_operands[RA0]);
++      n_new_lines = 1;
++    }
++  
++  
++  return n_new_lines;  
++}
++
++static int translate_lbzu (unsigned long insn, const struct powerpc_opcode * opcode, const char **literal_operands, char * output_string, const char **errmsg)
++{
++  int n_new_lines = 0;
++  const struct powerpc_operand *operand;
++  unsigned long RT_op ATTRIBUTE_UNUSED, RAL_op ATTRIBUTE_UNUSED;
++  short D_op;
++
++  /* lbzu RT, D, RAL */
++  operand = &powerpc_operands[opcode->operands[0]];
++  RT_op = (insn >> operand->shift) & operand->bitm;
++
++  operand = &powerpc_operands[opcode->operands[1]];
++  D_op = (short)(insn >> operand->shift) & operand->bitm;
++
++  operand = &powerpc_operands[opcode->operands[2]];
++  RAL_op = (insn >> operand->shift) & operand->bitm;
++
++  if (satisfies_constraint_kmmd8(D_op))
++    {/* e_lbzu RT, D8, RA0
++      * where RT -> RT, D -> D8, RAL -> RA0 */
++      sprintf(output_string, "e_lbzu %s,%s(%s)", literal_operands[RT],
++              literal_operands[D], literal_operands[RAL]);
++      n_new_lines = 1;
++    }
++  else
++    {
++    *errmsg = _("Cant convert 'lbzu': operand D out of range");
++    }
++  
++  return n_new_lines;  
++}
++
++static int translate_lha (unsigned long insn ATTRIBUTE_UNUSED, const struct powerpc_opcode * opcode ATTRIBUTE_UNUSED, const char **literal_operands, char * output_string, const char **errmsg ATTRIBUTE_UNUSED)
++{
++  /* lha RT, D, RA0 */
++
++  /* e_lha RT, D, RA0 */
++  sprintf(output_string, "e_lha %s,%s(%s)", literal_operands[RT], literal_operands[D], literal_operands[RA0]);
++
++  return 1;
++}
++
++static int translate_lhau (unsigned long insn, const struct powerpc_opcode * opcode, const char **literal_operands, char * output_string, const char **errmsg)
++{
++  int n_new_lines = 0;
++  const struct powerpc_operand *operand;
++  short D_op;
++
++  /* lhau RT, D, RAL */
++  operand = &powerpc_operands[opcode->operands[1]];
++  D_op = (short)(insn >> operand->shift) & operand->bitm;
++  
++  if (satisfies_constraint_kmmd8(D_op))
++    {/* e_lhau RT, D8, RA0 
++      * where RT -> RT, D -> D8, RAL -> RA0 */
++      sprintf(output_string, "e_lhau %s,%s(%s)", literal_operands[RT],
++              literal_operands[D], literal_operands[RAL]);
++      n_new_lines = 1;
++    }
++  else
++    {
++    *errmsg = _("Cant convert 'lhau': operand D out of range");
++    }
++    
++  return n_new_lines;
++}
++
++static int translate_lhz (unsigned long insn, const struct powerpc_opcode * opcode, const char **literal_operands, char * output_string, const char **errmsg ATTRIBUTE_UNUSED)
++{
++  int n_new_lines = 0;
++  const struct powerpc_operand *operand;
++  unsigned long RT_op, D_op, RA_op;  
++
++  /* lhz RT, D, RA0 */
++  operand = &powerpc_operands[opcode->operands[0]];
++  RT_op = (insn >> operand->shift) & operand->bitm;
++
++  operand = &powerpc_operands[opcode->operands[1]];
++  D_op = (insn >> operand->shift) & operand->bitm;
++
++  operand = &powerpc_operands[opcode->operands[2]];
++  RA_op = (insn >> operand->shift) & operand->bitm;
++  
++  
++  if (satisfies_constraint_kmsd4(D_op >> 1) && ((D_op & 0x1) == 0) && vle_reg_operand(RT_op) && vle_reg_operand(RA_op))
++    {/* se_lhz RZ, SE_SDH, RX
++      * where RT -> RZ, D -> SE_SDH,  RA0 -> RX */
++      sprintf(output_string, "se_lhz %s,%s(%s)", literal_operands[RT],
++              literal_operands[D], literal_operands[RA0]);
++      n_new_lines = 1;
++    }
++  else
++    {
++      /* e_lhz RT, D, RA0 */
++      sprintf(output_string, "e_lhz %s,%s(%s)", literal_operands[RT], literal_operands[D], literal_operands[RA0]);
++      n_new_lines = 1;
++    }
++
++  return n_new_lines;
++}
++
++static int translate_lhzu (unsigned long insn, const struct powerpc_opcode * opcode, const char **literal_operands, char * output_string, const char **errmsg)
++{
++  int n_new_lines = 0;
++  const struct powerpc_operand *operand;
++  short D_op;
++  
++  /* lhzu RT, D, RAL */
++  operand = &powerpc_operands[opcode->operands[1]];
++  D_op = (short)(insn >> operand->shift) & operand->bitm;
++  
++  
++  if (satisfies_constraint_kmmd8(D_op))
++    {/* e_lhzu RT, D8, RA0 
++      * where RT -> RT, D -> D8, RAL -> RA0 */
++      sprintf(output_string, "e_lhzu %s,%s(%s)", literal_operands[RT],
++              literal_operands[D], literal_operands[RAL]);
++      n_new_lines = 1;
++    }
++  else
++    {
++    *errmsg = _("Cant convert 'lhzu': operand D out of range");
++    }
++    
++  return n_new_lines;
++}
++
++static int translate_li (unsigned long insn, const struct powerpc_opcode * opcode, const char **literal_operands, char * output_string, const char **errmsg)
++{
++  int n_new_lines = 0;
++  const struct powerpc_operand *operand;
++  unsigned long RT_op;
++  short SI_op;
++
++  /* li RT, SI */
++  operand = &powerpc_operands[opcode->operands[0]];
++  RT_op = (insn >> operand->shift) & operand->bitm;
++  
++  operand = &powerpc_operands[opcode->operands[1]];
++  SI_op = (short)(insn >> operand->shift) & operand->bitm;    
++
++  if (vle_reg_operand(RT_op) && satisfies_constraint_kuim7(SI_op))
++    {
++      /* se_li RX, UI7 
++       * where RT -> RX, SI -> UI7 */
++      sprintf(output_string, "se_li %s,%s", literal_operands[RT], literal_operands[SI]);
++      n_new_lines = 1;
++    }
++   else if (satisfies_constraint_kli20(SI_op))
++    {/* e_li RT, IMM20 
++      * where RT -> RT, SI -> IMM20 */
++      sprintf(output_string, "e_li %s,%s", literal_operands[RT], literal_operands[SI]);
++      n_new_lines = 1;
++    }
++  else
++    {
++    *errmsg = _("Cant convert 'li': operand SI out of range");
++    }
++  
++  return n_new_lines;
++}
++
++static int translate_lis (unsigned long insn, const struct powerpc_opcode * opcode, const char **literal_operands, char * output_string, const char **errmsg)
++{
++  int n_new_lines = 0;
++  const struct powerpc_operand *operand;  
++  short SI_op;
++
++  /* lis RT, SISIGNOPT */
++  operand = &powerpc_operands[opcode->operands[1]];
++  SI_op = (short)(insn >> operand->shift) & operand->bitm;
++
++  if (satisfies_constraint_L((int)SI_op << 16))
++    {/* e_lis RD, VLEUIMML
++      * where RT -> RT, SISIGNOPT -> VLEUIMML */
++      sprintf(output_string, "e_lis %s,%s", literal_operands[RT], literal_operands[SISIGNOPT]);
++      n_new_lines = 1;
++    }
++  else
++    {
++    *errmsg = _("Cant convert 'lis': operand SI out of range");
++    }
++  
++  return n_new_lines;
++}
++
++
++static int translate_lmw (unsigned long insn ATTRIBUTE_UNUSED, const struct powerpc_opcode * opcode ATTRIBUTE_UNUSED, const char **literal_operands ATTRIBUTE_UNUSED, char * output_string, const char **errmsg ATTRIBUTE_UNUSED)
++{
++  int n_new_lines = 0;
++  /* lmw RT, D, RAM */
++  
++  /* e_lmw RT, D8, RA0 */
++  sprintf(output_string, "e_lmw %s,%s(%s)", literal_operands[RT], literal_operands[D], literal_operands[RAM]);
++  n_new_lines = 1;
++  
++  return n_new_lines;
++}
++
++static int translate_lwz (unsigned long insn, const struct powerpc_opcode * opcode, const char **literal_operands, char * output_string, const char **errmsg ATTRIBUTE_UNUSED)
++{
++  int n_new_lines = 0;
++  const struct powerpc_operand *operand;
++  unsigned long RT_op, RA_op;
++  short D_op;
++
++  /* lwz RT, D, RA0 */
++  operand = &powerpc_operands[opcode->operands[0]];
++  RT_op = (insn >> operand->shift) & operand->bitm;
++
++  operand = &powerpc_operands[opcode->operands[1]];
++  D_op = (short)(insn >> operand->shift) & operand->bitm;
++
++  operand = &powerpc_operands[opcode->operands[2]];
++  RA_op = (insn >> operand->shift) & operand->bitm;
++
++  if (satisfies_constraint_kmsd4(D_op >> 2) && ((D_op & 0x3) == 0) && vle_reg_operand(RT_op) && vle_reg_operand(RA_op))
++    {/* se_lwz RZ, SE_SDW, RX
++      * where RT -> RZ, D -> SE_SDW, RA0 -> RX */
++      sprintf(output_string, "se_lwz %s,%s(%s)", literal_operands[RT], literal_operands[D], literal_operands[RA0]);
++      n_new_lines = 1;
++    }
++  else
++    {/* e_lwz RT, D, RA0 */
++      sprintf(output_string, "e_lwz %s,%s(%s)", literal_operands[RT], literal_operands[D], literal_operands[RA0]);
++      n_new_lines = 1;
++    }
++  
++  return n_new_lines;
++}
++
++static int translate_lwzu (unsigned long insn ATTRIBUTE_UNUSED, const struct powerpc_opcode * opcode ATTRIBUTE_UNUSED, const char **literal_operands ATTRIBUTE_UNUSED, char * output_string, const char **errmsg ATTRIBUTE_UNUSED)
++{
++  int n_new_lines = 0;
++  
++  /* lwzu RT, D, RAL */
++
++    {/* e_lwzu RT, D8, RA0 */
++      sprintf(output_string, "e_lwzu %s,%s(%s)", literal_operands[RT], literal_operands[D], literal_operands[RAL]);
++      n_new_lines = 1;
++    }
++  
++  
++  return n_new_lines;
++}
++
++static int translate_mcrf (unsigned long insn ATTRIBUTE_UNUSED, const struct powerpc_opcode * opcode ATTRIBUTE_UNUSED, const char **literal_operands, char * output_string, const char **errmsg ATTRIBUTE_UNUSED)
++{
++  /* mcrf BF, BFA */
++ 
++  /* e_mcrf CRD, CR */
++  sprintf(output_string, "e_mcrf %s,%s", literal_operands[BF], literal_operands[BFA]);
++  
++  return 1;
++}
++
++static int translate_mfdec (unsigned long insn ATTRIBUTE_UNUSED, const struct powerpc_opcode * opcode ATTRIBUTE_UNUSED, const char **literal_operands, char * output_string, const char **errmsg ATTRIBUTE_UNUSED)
++{
++  /* mfdec RT */
++  sprintf(output_string, "mfspr %s,22", literal_operands[RT]);
++  return 1;
++}
++
++static int translate_mulli (unsigned long insn, const struct powerpc_opcode * opcode, const char **literal_operands, char * output_string, const char **errmsg ATTRIBUTE_UNUSED)
++{
++  int n_new_lines = 0;
++  const struct powerpc_operand *operand;
++  unsigned long RT_op, RA_op;
++  short SI_op;
++
++  /* mulli RT, RA, SI */
++  operand = &powerpc_operands[opcode->operands[0]];
++  RT_op = (insn >> operand->shift) & operand->bitm; 
++  
++  operand = &powerpc_operands[opcode->operands[1]];
++  RA_op = (insn >> operand->shift) & operand->bitm; 
++  
++  operand = &powerpc_operands[opcode->operands[2]];
++  SI_op = (short)(insn >> operand->shift) & operand->bitm; 
++  
++  if (satisfies_constraint_ksci8(SI_op))
++    {
++      /* e_mulli RT, RA, SCLSCI8
++       * where RT -> RT, RA0 -> RA, SI -> SCLSCI8 */
++      sprintf(output_string, "e_mulli %s,%s,%s", literal_operands[RT],
++              literal_operands[RA], literal_operands[SI]);
++      n_new_lines = 1;
++    }
++  else if (RT_op == RA_op && satisfies_constraint_I(SI_op))
++    {
++      /* e_mull2i RA, VLESIMM
++       * where RA -> RA, SISIGNOPT -> VLESIMM */
++      sprintf(output_string, "e_mull2i %s,%s", literal_operands[RA],
++              literal_operands[SI]);
++      n_new_lines = 1;
++    }
++
++  return n_new_lines;
++}
++
++static int translate_mr (unsigned long insn, const struct powerpc_opcode * opcode, const char **literal_operands, char * output_string, const char **errmsg ATTRIBUTE_UNUSED)
++{
++  int n_new_lines = 0;
++  const struct powerpc_operand *operand;
++  unsigned long RA_op, RS_op;
++  
++  /* mr RA, RS, RBS */
++  operand = &powerpc_operands[opcode->operands[0]];
++  RA_op = (insn >> operand->shift) & operand->bitm; 
++  
++  operand = &powerpc_operands[opcode->operands[1]];
++  RS_op = (insn >> operand->shift) & operand->bitm; 
++  
++  if (vle_reg_operand(RA_op) && vle_reg_operand(RS_op))
++    {
++      /* se_mr RX, RY */
++      sprintf(output_string, "se_mr %s,%s", literal_operands[RA], literal_operands[RS]);
++      n_new_lines = 1;
++    }
++  else if (vle_reg_operand(RA_op))
++    {
++      /* se_mfar RX, ARY  */
++      sprintf(output_string, "se_mfar %s,%s", literal_operands[RA], literal_operands[RS]);
++      n_new_lines = 1;
++    }
++  else if (vle_reg_operand(RS_op))
++    {
++      /* se_mtar ARX, RY  */
++      sprintf(output_string, "se_mtar %s,%s", literal_operands[RA], literal_operands[RS]);
++      n_new_lines = 1;
++    }
++  else
++    { /* keep mr instruction while it VLE */
++      /* mr RA, RS, RBS */
++      sprintf(output_string, "mr %s,%s", literal_operands[RA], literal_operands[RS]);
++      n_new_lines = 1;
++    }
++
++  return n_new_lines;
++}
++
++static int translate_mtdec (unsigned long insn ATTRIBUTE_UNUSED, const struct powerpc_opcode * opcode ATTRIBUTE_UNUSED, const char **literal_operands, char * output_string, const char **errmsg ATTRIBUTE_UNUSED)
++{
++  /* mtdec RS */
++  sprintf(output_string, "mtspr 22,%s", literal_operands[RS]);
++  return 1;
++}
++
++static int translate_nop (unsigned long insn ATTRIBUTE_UNUSED, const struct powerpc_opcode * opcode ATTRIBUTE_UNUSED, const char **literal_operands ATTRIBUTE_UNUSED, char * output_string, const char **errmsg ATTRIBUTE_UNUSED)
++{
++  sprintf(output_string, "se_nop");
++  return 1;
++}
++
++static int translate_or (unsigned long insn, const struct powerpc_opcode * opcode, const char **literal_operands, char * output_string, const char **errmsg ATTRIBUTE_UNUSED)
++{
++  int n_new_lines = 0;
++  const struct powerpc_operand *operand;
++  unsigned long RA_op, RS_op, RB_op;
++  
++  /* or RA, RS, RB */
++  operand = &powerpc_operands[opcode->operands[0]];
++  RA_op = (insn >> operand->shift) & operand->bitm; 
++  
++  operand = &powerpc_operands[opcode->operands[1]];
++  RS_op = (insn >> operand->shift) & operand->bitm; 
++  
++  operand = &powerpc_operands[opcode->operands[2]];
++  RB_op = (insn >> operand->shift) & operand->bitm;
++  
++  if (RA_op == 0 && RS_op == 0 && RB_op == 0)
++    {
++      /* se_nop */     
++      sprintf(output_string, "se_nop");
++      n_new_lines = 1;
++    }
++  else if (RA_op == RS_op && vle_reg_operand(RA_op) && vle_reg_operand(RS_op) && vle_reg_operand(RB_op))
++    {
++      /* se_or RX, RY */
++      sprintf(output_string, "se_or %s,%s", literal_operands[RA], literal_operands[RB]);
++      n_new_lines = 1;
++    }
++  else if (RB_op == RS_op)
++    {
++      /* mr RA, RS, RBS */
++      sprintf(output_string, "mr %s,%s", literal_operands[RA], literal_operands[RB]);
++      n_new_lines = 1;
++    }
++  else
++    {
++      /* keep or instruction while it VLE */
++      /* or RA, RS, RB */
++      sprintf(output_string, "or %s,%s,%s", literal_operands[RA], literal_operands[RS], literal_operands[RB]);
++      n_new_lines = 1;
++    }
++  
++  return n_new_lines;
++}
++
++static int translate_ori (unsigned long insn, const struct powerpc_opcode * opcode, const char **literal_operands, char * output_string, const char **errmsg ATTRIBUTE_UNUSED)
++{
++  int n_new_lines = 0;
++  const struct powerpc_operand *operand;
++  unsigned long RA_op, RS_op, UI_op;
++  
++  /* ori RA, RS, UI */
++  operand = &powerpc_operands[opcode->operands[0]];
++  RA_op = (insn >> operand->shift) & operand->bitm; 
++  
++  operand = &powerpc_operands[opcode->operands[1]];
++  RS_op = (insn >> operand->shift) & operand->bitm; 
++  
++  operand = &powerpc_operands[opcode->operands[2]];
++  UI_op = (insn >> operand->shift) & operand->bitm;
++  
++  if (RA_op == 0 && RA_op == RS_op && UI_op == 0)
++    {
++      /* e_nop */      
++      sprintf(output_string, "e_nop");
++      n_new_lines = 1;
++    }
++  else if (satisfies_constraint_ksci8(UI_op))
++    {
++      /* e_ori RA, RS, SCLSCI8
++       * where RA -> RA, RS -> RS, UI -> SCLSCI8 */
++      sprintf(output_string, "e_ori %s,%s,%s", literal_operands[RA], 
++              literal_operands[RS], literal_operands[UI]);
++      n_new_lines = 1;
++    }
++  else if (RA_op == RS_op && satisfies_constraint_K(UI_op))
++    {
++      /* e_or2i RD, VLEUIMML 
++         where RA -> RD, UI -> VLEUIMML */
++      sprintf(output_string, "e_or2i %s,%s", literal_operands[RA], literal_operands[UI]);
++      n_new_lines = 1;
++    }
++  
++  return n_new_lines;
++}
++
++static int translate_oris (unsigned long insn, const struct powerpc_opcode * opcode, const char **literal_operands, char * output_string, const char **errmsg ATTRIBUTE_UNUSED)
++{
++  int n_new_lines = 0;
++  const struct powerpc_operand *operand;
++  unsigned long RA_op, RS_op, UI_op;
++  
++  /* oris RA, RS, UI */
++  operand = &powerpc_operands[opcode->operands[0]];
++  RA_op = (insn >> operand->shift) & operand->bitm; 
++  
++  operand = &powerpc_operands[opcode->operands[1]];
++  RS_op = (insn >> operand->shift) & operand->bitm; 
++  
++  operand = &powerpc_operands[opcode->operands[2]];
++  UI_op = (insn >> operand->shift) & operand->bitm;  
++
++  if (RA_op == RS_op && satisfies_constraint_K(UI_op))
++    {
++      /* e_or2is RD, VLEUIMML 
++         where RA -> RD, UI -> VLEUIMML */
++      sprintf(output_string, "e_or2is %s,%s", literal_operands[RA], literal_operands[UI]);
++      n_new_lines = 1;
++    }  
++  else if (satisfies_constraint_ksci8(UI_op << 16))
++    {
++      /* e_ori RA, RS, SCLSCI8
++       * where RA -> RA, RS -> RS, UI -> SCLSCI8 */
++      sprintf(output_string, "e_ori %s,%s,%d", literal_operands[RA], 
++              literal_operands[RS], (unsigned int)(UI_op << 16));
++      n_new_lines = 1;
++    }
++  
++  return n_new_lines;
++}
++
++static int translate_rfci (unsigned long insn ATTRIBUTE_UNUSED, const struct powerpc_opcode * opcode ATTRIBUTE_UNUSED, const char **literal_operands ATTRIBUTE_UNUSED, char * output_string, const char **errmsg ATTRIBUTE_UNUSED)
++{
++  sprintf(output_string, "se_rfci");
++  return 1;
++}
++
++static int translate_rfdi (unsigned long insn ATTRIBUTE_UNUSED, const struct powerpc_opcode * opcode ATTRIBUTE_UNUSED, const char **literal_operands ATTRIBUTE_UNUSED, char * output_string, const char **errmsg ATTRIBUTE_UNUSED)
++{
++  sprintf(output_string, "se_rfdi");
++  return 1;
++}
++
++static int translate_rfi (unsigned long insn ATTRIBUTE_UNUSED, const struct powerpc_opcode * opcode ATTRIBUTE_UNUSED, const char **literal_operands ATTRIBUTE_UNUSED, char * output_string, const char **errmsg ATTRIBUTE_UNUSED)
++{
++  sprintf(output_string, "se_rfi");
++  return 1;
++}
++
++static int translate_rfmci (unsigned long insn ATTRIBUTE_UNUSED, const struct powerpc_opcode * opcode ATTRIBUTE_UNUSED, const char **literal_operands ATTRIBUTE_UNUSED, char * output_string, const char **errmsg ATTRIBUTE_UNUSED)
++{
++  sprintf(output_string, "se_rfmci");
++  return 1;
++}
++
++static int translate_rlwimi (unsigned long insn ATTRIBUTE_UNUSED, const struct powerpc_opcode * opcode ATTRIBUTE_UNUSED, const char **literal_operands, char * output_string, const char **errmsg ATTRIBUTE_UNUSED)
++{
++  /* rlwimi RA, RS, SH, MBE, ME */
++  
++  /* e_rlwimi RA, RS, SH, MB, ME */
++  sprintf(output_string, "e_rlwimi %s,%s,%s,%s,%s", literal_operands[RA], literal_operands[RS],
++          literal_operands[SH], literal_operands[MBE], literal_operands[ME]);
++  
++  return 1;
++}
++
++static int translate_rlwnm (unsigned long insn ATTRIBUTE_UNUSED, const struct powerpc_opcode * opcode ATTRIBUTE_UNUSED, const char **literal_operands, char * output_string, const char **errmsg ATTRIBUTE_UNUSED)
++{
++  int n_new_lines = 0;
++  
++  /* rlwnm RA, RS, RB, MBE, ME */
++  
++  if (strcmp (opcode->name, "rotlw") == 0)
++    {
++      /* rotlw RA, RS, RB ->  e_rlw RA, RS, RB */
++      sprintf(output_string, "e_rlw %s,%s,%s", literal_operands[RA], literal_operands[RS],
++              literal_operands[RB]);
++      n_new_lines = 1;
++    }
++  else if (strcmp (opcode->name, "rotlw.") == 0)
++    {
++      /* rotlw. RA, RS, RB ->  e_rlw. RA, RS, RB */
++      sprintf(output_string, "e_rlw. %s,%s,%s", literal_operands[RA], literal_operands[RS],
++              literal_operands[RB]);
++      n_new_lines = 1;
++    }
++
++  return n_new_lines;
++}
++
++static int translate_rlwinm (unsigned long insn, const struct powerpc_opcode * opcode, const char **literal_operands, char * output_string, const char **errmsg ATTRIBUTE_UNUSED)
++{
++  int n_new_lines = 0;
++  const struct powerpc_operand *operand;
++  unsigned long RA_op, RS_op, SH_op, MBE_op ATTRIBUTE_UNUSED, ME_op ATTRIBUTE_UNUSED;
++  int use_se = 0;
++  
++  /* rlwinm RA, RS, SH, MBE, ME */
++  operand = &powerpc_operands[opcode->operands[0]];
++  RA_op = (insn >> operand->shift) & operand->bitm;
++  
++  operand = &powerpc_operands[opcode->operands[1]];
++  RS_op = (insn >> operand->shift) & operand->bitm;
++  
++  operand = &powerpc_operands[opcode->operands[2]];
++  SH_op = (insn >> operand->shift) & operand->bitm;
++  
++  operand = &powerpc_operands[opcode->operands[3]];
++  MBE_op = (insn >> operand->shift) & operand->bitm;
++    
++  operand = &powerpc_operands[opcode->operands[4]];
++  ME_op = (insn >> operand->shift) & operand->bitm;
++  
++   
++  use_se = RA_op == RS_op && vle_reg_operand(RA_op) && vle_reg_operand(RS_op);
++  
++  /* NOTE: slwi and srwi instructions defined by macro and source name is provided to us via 'output_string' as workaround */
++  if (strcmp (output_string, "slwi") == 0)
++    {
++      /* slwi */
++      if (use_se && satisfies_constraint_kuim5(SH_op))
++        {
++          /* se_slwi RX, UI5 */
++          sprintf(output_string, "se_slwi %s,%s", literal_operands[RA], literal_operands[SH]);
++          n_new_lines = 1;
++        }
++      else
++        {
++          /* e_slwi RA, RS, SH */
++          sprintf(output_string, "e_slwi %s,%s,%s", literal_operands[RA], literal_operands[RS], literal_operands[SH]);
++          n_new_lines = 1;
++        }
++    }
++  else if (strcmp (output_string, "srwi") == 0)
++    {
++      /* srwi */
++      if (use_se && satisfies_constraint_kuim5(SH_op))
++        {
++          /* se_srwi RX, UI5 */
++          sprintf(output_string, "se_srwi %s,%d", literal_operands[RA], (int)((SH_op == 0)?(0):(32-SH_op)));
++          n_new_lines = 1;
++        }
++      else
++        {
++          /* e_srwi RA, RS, SH */
++          sprintf(output_string, "e_srwi %s,%s,%d", literal_operands[RA], literal_operands[RS], (int)((SH_op == 0)?(0):(32-SH_op)));
++          n_new_lines = 1;
++        }
++    }
++  else if (strcmp (opcode->name, "rotlwi") == 0)
++    {
++      /* rotlwi   RA, RS, SH        */
++      /* e_rlwinm RA, RT, SH, 0, 31 */
++      sprintf(output_string, "e_rlwinm %s,%s,%s,0,31", literal_operands[RA], literal_operands[RS],
++              literal_operands[SH]);
++      n_new_lines = 1;
++    }
++  else if (strcmp (opcode->name, "clrlwi") == 0)
++    {
++      /* clrlwi   RA, RS,     MB     */
++      /* e_rlwinm RA, RT, 0, MBE, 31 */
++      sprintf(output_string, "e_rlwinm %s,%s,0,%s,31", literal_operands[RA], literal_operands[RS],
++              literal_operands[MB]);
++      n_new_lines = 1;
++    }
++  else
++    {
++      /* e_rlwinm RA, RT, SH, MBE, ME */
++      sprintf(output_string, "e_rlwinm %s,%s,%s,%s,%s", literal_operands[RA], literal_operands[RS],
++              literal_operands[SH], literal_operands[MBE], literal_operands[ME]);
++      n_new_lines = 1;
++    }
++  
++  return n_new_lines;
++}
++
++static int translate_sc (unsigned long insn, const struct powerpc_opcode * opcode, const char **literal_operands ATTRIBUTE_UNUSED, char * output_string, const char **errmsg)
++{
++  int n_new_lines = 0;
++  const struct powerpc_operand *operand;
++  unsigned long LEV_op;
++
++  /* sc LEV */
++  operand = &powerpc_operands[opcode->operands[0]];
++  LEV_op = (insn >> operand->shift) & operand->bitm;
++  
++  if (LEV_op == 0)
++    {
++      sprintf(output_string, "se_sc");
++      n_new_lines = 1;
++    } 
++  else if (LEV_op == 1)
++    {
++      sprintf(output_string, "e_sc %s", literal_operands[LEV]);
++      n_new_lines = 1;
++    }
++  else
++    {
++      *errmsg = _("Cant convert 'sc': LEV value not supported");
++    }
++  
++  return n_new_lines;  
++}
++
++static int translate_stb (unsigned long insn, const struct powerpc_opcode * opcode, const char **literal_operands, char * output_string, const char **errmsg ATTRIBUTE_UNUSED)
++{
++  int n_new_lines = 0;
++  const struct powerpc_operand *operand;
++  unsigned long RS_op, RA_op;
++  short D_op;
++  
++  /* stb RS, D, RA0 */
++  operand = &powerpc_operands[opcode->operands[0]];
++  RS_op = (insn >> operand->shift) & operand->bitm;
++
++  operand = &powerpc_operands[opcode->operands[1]];
++  D_op = (short)(insn >> operand->shift) & operand->bitm;
++
++  operand = &powerpc_operands[opcode->operands[2]];
++  RA_op = (insn >> operand->shift) & operand->bitm;
++  
++  if (satisfies_constraint_kmsd4(D_op) && vle_reg_operand(RS_op) && vle_reg_operand(RA_op))
++    {/* se_stb RZ, SE_SD, RX
++      * where RS -> RZ, D -> SE_SD,  RA0 -> RX */
++      sprintf(output_string, "se_stb %s,%s(%s)", literal_operands[RS],
++              literal_operands[D], literal_operands[RA0]);
++      n_new_lines = 1;
++    }
++  else if (satisfies_constraint_I(D_op))
++    {
++      /* e_stb RT, D, RA0
++       * where RS -> RT, D -> D, RA0 -> RA0 */
++      sprintf(output_string, "e_stb %s,%s(%s)", literal_operands[RS],
++              literal_operands[D], literal_operands[RA0]);
++      n_new_lines = 1;
++    }
++ 
++  return n_new_lines; 
++}
++
++static int translate_stbu (unsigned long insn, const struct powerpc_opcode * opcode, const char **literal_operands, char * output_string, const char **errmsg)
++{
++  int n_new_lines = 0;
++  const struct powerpc_operand *operand;
++  unsigned long RS_op ATTRIBUTE_UNUSED, RAS_op ATTRIBUTE_UNUSED;
++  short D_op;
++  
++  /* stbu RS, D, RAS */
++  operand = &powerpc_operands[opcode->operands[0]];
++  RS_op = (insn >> operand->shift) & operand->bitm;
++
++  operand = &powerpc_operands[opcode->operands[1]];
++  D_op = (short)(insn >> operand->shift) & operand->bitm;
++
++  operand = &powerpc_operands[opcode->operands[2]];
++  RAS_op = (insn >> operand->shift) & operand->bitm;
++  
++  if (satisfies_constraint_kmmd8(D_op))
++    {/* e_stbu RT, D8, RA0
++      * where RS -> RT, D -> D8, RAS -> RA0 */
++      sprintf(output_string, "e_stbu %s,%s(%s)", literal_operands[RS],
++              literal_operands[D], literal_operands[RAS]);
++      n_new_lines = 1;
++    }
++  else
++    {
++    *errmsg = _("Cant convert 'stbu': operand D out of range");
++    }  
++  
++  return n_new_lines;  
++}
++
++static int translate_sth (unsigned long insn, const struct powerpc_opcode * opcode, const char **literal_operands, char * output_string, const char **errmsg ATTRIBUTE_UNUSED)
++{
++  int n_new_lines = 0;
++  const struct powerpc_operand *operand;
++  unsigned long RS_op, RA_op;
++  short D_op;
++  
++  /* sth RS, D, RA0 */
++  operand = &powerpc_operands[opcode->operands[0]];
++  RS_op = (insn >> operand->shift) & operand->bitm;
++
++  operand = &powerpc_operands[opcode->operands[1]];
++  D_op = (short)(insn >> operand->shift) & operand->bitm;
++
++  operand = &powerpc_operands[opcode->operands[2]];
++  RA_op = (insn >> operand->shift) & operand->bitm;
++  
++  if (satisfies_constraint_kmsd4(D_op >> 1) && ((D_op & 0x1) == 0) && vle_reg_operand(RS_op) && vle_reg_operand(RA_op))
++    {/* se_sth RZ, SE_SDH, RX
++      * where RS -> RZ, D -> SE_SDH,  RA0 -> RX */
++      sprintf(output_string, "se_sth %s,%s(%s)", literal_operands[RS],
++              literal_operands[D], literal_operands[RA0]);
++      n_new_lines = 1;
++    }
++  else if (satisfies_constraint_I(D_op))
++    {
++      /* e_stb RT, D, RA0
++       * where RS -> RT, D -> D, RA0 -> RA0 */
++      sprintf(output_string, "e_sth %s,%s(%s)", literal_operands[RS],
++              literal_operands[D], literal_operands[RA0]);
++      n_new_lines = 1;
++    }
++ 
++  return n_new_lines;
++}
++
++static int translate_sthu (unsigned long insn, const struct powerpc_opcode * opcode, const char **literal_operands, char * output_string, const char **errmsg)
++{
++  int n_new_lines = 0;
++  const struct powerpc_operand *operand;
++  unsigned long RS_op ATTRIBUTE_UNUSED, RAS_op ATTRIBUTE_UNUSED;
++  short D_op;
++  
++  /* sthu RS, D, RAS */
++  operand = &powerpc_operands[opcode->operands[0]];
++  RS_op = (insn >> operand->shift) & operand->bitm;
++
++  operand = &powerpc_operands[opcode->operands[1]];
++  D_op = (short)(insn >> operand->shift) & operand->bitm;
++
++  operand = &powerpc_operands[opcode->operands[2]];
++  RAS_op = (insn >> operand->shift) & operand->bitm;
++
++  if (satisfies_constraint_kmmd8(D_op))
++    {/* e_sthu RT, D8, RA0
++      * where RS -> RT, D -> D8, RAS -> RA0 */
++      sprintf(output_string, "e_sthu %s,%s(%s)", literal_operands[RS],
++              literal_operands[D], literal_operands[RAS]);
++      n_new_lines = 1;
++    }
++  else
++    {
++    *errmsg = _("Cant convert 'sthu': operand D out of range");
++    }  
++
++  return n_new_lines;
++}
++
++static int translate_stmw (unsigned long insn, const struct powerpc_opcode * opcode, const char **literal_operands, char * output_string, const char **errmsg)
++{
++  int n_new_lines = 0;
++  const struct powerpc_operand *operand;
++  unsigned long RS_op ATTRIBUTE_UNUSED, RA_op ATTRIBUTE_UNUSED;
++  short D_op;
++
++  /* stmw RS, D, RA0 */
++  operand = &powerpc_operands[opcode->operands[0]];
++  RS_op = (insn >> operand->shift) & operand->bitm;
++
++  operand = &powerpc_operands[opcode->operands[1]];
++  D_op = (short)(insn >> operand->shift) & operand->bitm;
++
++  operand = &powerpc_operands[opcode->operands[2]];
++  RA_op = (insn >> operand->shift) & operand->bitm; 
++  
++  if (satisfies_constraint_kmmd8(D_op))
++    {/* e_stmw RT, D8, RA0
++      * where RS -> RT, D -> D8, RA0 -> RA0 */
++      sprintf(output_string, "e_stmw %s,%s(%s)", literal_operands[RS],
++              literal_operands[D], literal_operands[RA0]);
++      n_new_lines = 1;
++    }
++  else
++    {
++    *errmsg = _("Cant convert 'stmw': operand D out of range");
++    } 
++  
++  return n_new_lines;
++}
++
++static int translate_stw (unsigned long insn, const struct powerpc_opcode * opcode, const char **literal_operands, char * output_string, const char **errmsg ATTRIBUTE_UNUSED)
++{
++  int n_new_lines = 0;
++  const struct powerpc_operand *operand;
++  unsigned long RS_op, RA_op;
++  short D_op;
++
++  /* stw RS, D, RA0 */
++  operand = &powerpc_operands[opcode->operands[0]];
++  RS_op = (insn >> operand->shift) & operand->bitm;
++
++  operand = &powerpc_operands[opcode->operands[1]];
++  D_op = (short)(insn >> operand->shift) & operand->bitm;
++
++  operand = &powerpc_operands[opcode->operands[2]];
++  RA_op = (insn >> operand->shift) & operand->bitm;
++
++  if (satisfies_constraint_kmsd4(D_op >> 2) && ((D_op & 0x3) == 0) && vle_reg_operand(RS_op) && vle_reg_operand(RA_op))
++    {/* se_stw RZ, SE_SDW(RX)
++      * where RS -> RZ, D -> SE_SDW,  RA0 -> RX */
++      sprintf(output_string, "se_stw %s,%s(%s)", literal_operands[RS],
++              literal_operands[D], literal_operands[RA0]);
++      n_new_lines = 1;
++    }
++  else if (satisfies_constraint_I(D_op))
++    {
++      /* e_stw RT, D(RA0)
++       * where RS -> RT, D -> D, RA0 -> RA0 */
++      sprintf(output_string, "e_stw %s,%s(%s)", literal_operands[RS],
++              literal_operands[D], literal_operands[RA0]);
++      n_new_lines = 1;
++    }
++
++  return n_new_lines;
++}
++
++static int translate_stwu (unsigned long insn, const struct powerpc_opcode * opcode, const char **literal_operands, char * output_string, const char **errmsg)
++{
++  int n_new_lines = 0;
++  const struct powerpc_operand *operand;
++  unsigned long RS_op ATTRIBUTE_UNUSED, RAS_op ATTRIBUTE_UNUSED;
++  short D_op;
++  
++  /* stwu RS, D, RAS */
++  operand = &powerpc_operands[opcode->operands[0]];
++  RS_op = (insn >> operand->shift) & operand->bitm;
++
++  operand = &powerpc_operands[opcode->operands[1]];
++  D_op = (short)(insn >> operand->shift) & operand->bitm;
++
++  operand = &powerpc_operands[opcode->operands[2]];
++  RAS_op = (insn >> operand->shift) & operand->bitm;
++
++  if (satisfies_constraint_kmmd8(D_op))
++    {/* e_stwu RT, D8, RA0
++      * where RS -> RT, D -> D8, RAS -> RA0 */
++      sprintf(output_string, "e_stwu %s,%s(%s)", literal_operands[RS],
++              literal_operands[D], literal_operands[RAS]);
++      n_new_lines = 1;
++    }
++  else
++    {
++    *errmsg = _("Cant convert 'stwu': operand D out of range");
++    }
++
++  return n_new_lines;
++}
++
++static int translate_subi (unsigned long insn, const struct powerpc_opcode * opcode, const char **literal_operands, char * output_string, const char **errmsg ATTRIBUTE_UNUSED)
++{
++  int n_new_lines = 0;
++  const struct powerpc_operand *operand;
++  unsigned long RT_op, RA_op;
++  short NSI_op;
++
++  /* subi RT, RA0, NSI */
++  operand = &powerpc_operands[opcode->operands[0]];
++  RT_op = (insn >> operand->shift) & operand->bitm;
++
++  operand = &powerpc_operands[opcode->operands[1]];
++  RA_op = (insn >> operand->shift) & operand->bitm;
++
++  operand = &powerpc_operands[opcode->operands[2]];
++  NSI_op = (short)(insn >> operand->shift) & operand->bitm;
++  
++  if (RT_op == RA_op && vle_reg_operand(RT_op) && satisfies_constraint_koim5(-NSI_op))
++    {
++      /* se_subi RX, OIMM5
++       * where RT -> RX, NSI -> OIMM5 */
++      sprintf(output_string, "se_subi %s,%s", literal_operands[RT], literal_operands[NSI]);
++      n_new_lines = 1;
++    }
++  else if ( satisfies_constraint_ksci8(NSI_op) )
++    {
++      /* e_addi RT, RA, SCLSCI8
++       * where RT -> RT, RA0 -> RA, SI -> SCLSCI8 */
++      sprintf(output_string, "e_addi %s,%s,%d", literal_operands[RT],
++              literal_operands[RA0], NSI_op);
++      n_new_lines = 1;
++    }
++  else if (satisfies_constraint_I(NSI_op))
++   {
++      /* e_add16i RT, RA, SI
++       * where RT -> RT, RA0 -> RA, NSI -> SI */
++      sprintf(output_string, "e_add16i %s,%s,%d", literal_operands[RT],
++              literal_operands[RA0], NSI_op);
++      n_new_lines = 1;
++   }
++
++  return n_new_lines;
++}
++
++static int translate_subic (unsigned long insn, const struct powerpc_opcode * opcode, const char **literal_operands, char * output_string, const char **errmsg ATTRIBUTE_UNUSED)
++{
++  int n_new_lines = 0;
++  const struct powerpc_operand *operand;
++  unsigned long RT_op ATTRIBUTE_UNUSED, RA_op ATTRIBUTE_UNUSED;
++  short NSI_op;
++
++  /* subic RT, RA, NSI */
++  /* subic. RT, RA, NSI */
++  operand = &powerpc_operands[opcode->operands[0]];
++  RT_op = (insn >> operand->shift) & operand->bitm;
++
++  operand = &powerpc_operands[opcode->operands[1]];
++  RA_op = (insn >> operand->shift) & operand->bitm;
++
++  operand = &powerpc_operands[opcode->operands[2]];
++  NSI_op = (short)(insn >> operand->shift) & operand->bitm;
++
++   
++  if (satisfies_constraint_ksci8(NSI_op))
++    {
++      if (strcmp (opcode->name, "subic") == 0)
++        {
++          /* e_addic RT, RA, SCLSCI8
++          * where RT -> RT, RA -> RA, NSI -> SCLSCI8 */
++          sprintf(output_string, "e_addic %s,%s,%d", literal_operands[RT],
++                  literal_operands[RA], NSI_op);
++          n_new_lines = 1;
++        }
++      else /* subic. */
++        {
++          /* e_addic. RT, RA, SCLSCI8
++          * where RT -> RT, RA -> RA, NSI -> SCLSCI8 */
++          sprintf(output_string, "e_addic. %s,%s,%d", literal_operands[RT],
++                  literal_operands[RA], NSI_op);
++          n_new_lines = 1;
++        }
++    }
++
++return n_new_lines;
++}
++
++static int translate_subis (unsigned long insn, const struct powerpc_opcode * opcode, const char **literal_operands, char * output_string, const char **errmsg ATTRIBUTE_UNUSED)
++{
++  int n_new_lines = 0;
++  const struct powerpc_operand *operand;
++  unsigned long RT_op, RA_op;
++  short NSI_op;
++  
++  /* subis RT, RA0, NSI */
++  operand = &powerpc_operands[opcode->operands[0]];
++  RT_op = (insn >> operand->shift) & operand->bitm;
++  
++  operand = &powerpc_operands[opcode->operands[1]];
++  RA_op = (insn >> operand->shift) & operand->bitm;
++  
++  operand = &powerpc_operands[opcode->operands[2]];
++  NSI_op = (short)(insn >> operand->shift) & operand->bitm;
++
++  if (RT_op == RA_op && satisfies_constraint_L((int)NSI_op << 16))
++    {
++      /* e_add2is RA, VLESIMM
++       * where RA0 -> RA, SISIGNOPT -> VLESIMM */
++      sprintf(output_string, "e_add2is %s,%d", literal_operands[RA0], NSI_op);
++      n_new_lines = 1;
++    }
++  else if (satisfies_constraint_ksci8((int)NSI_op << 16))
++    {
++      /* e_addi RT, RA, SCLSCI8
++       * where RT -> RT, RA0 -> RA, SISIGNOPT -> SCLSCI8 */
++      sprintf(output_string, "e_addi %s,%s,%d", literal_operands[RT],
++              literal_operands[RA0], (int)NSI_op << 16);
++      n_new_lines = 1;
++    }  
++ 
++  return n_new_lines;
++}
++
++static int translate_subfic (unsigned long insn, const struct powerpc_opcode * opcode, const char **literal_operands, char * output_string, const char **errmsg ATTRIBUTE_UNUSED)
++{
++  int n_new_lines = 0;
++  const struct powerpc_operand *operand;
++  unsigned long RT_op ATTRIBUTE_UNUSED, RA_op ATTRIBUTE_UNUSED;
++  short SI_op;
++
++  /* subfic RT, RA, SI*/
++  operand = &powerpc_operands[opcode->operands[0]];
++  RT_op = (insn >> operand->shift) & operand->bitm;
++  
++  operand = &powerpc_operands[opcode->operands[1]];
++  RA_op = (insn >> operand->shift) & operand->bitm;
++  
++  operand = &powerpc_operands[opcode->operands[2]];
++  SI_op = (short)(insn >> operand->shift) & operand->bitm;
++
++  if (satisfies_constraint_ksci8(SI_op))
++    {
++      /* e_subfic RT, RA, SCLSCI8
++       * where RT -> RT, RA -> RA, SI -> SCLSCI8 */
++      sprintf(output_string, "e_subfic %s,%s,%s", literal_operands[RT],
++              literal_operands[RA], literal_operands[SI]);
++      n_new_lines = 1;
++    }
++
++  return n_new_lines;
++}
++
++static int translate_xori (unsigned long insn, const struct powerpc_opcode * opcode, const char **literal_operands, char * output_string, const char **errmsg ATTRIBUTE_UNUSED)
++{
++  int n_new_lines = 0;
++  const struct powerpc_operand *operand;
++  unsigned long RA_op ATTRIBUTE_UNUSED, RS_op ATTRIBUTE_UNUSED, UI_op;
++
++  /* xori RA, RS, UI */
++  operand = &powerpc_operands[opcode->operands[0]];
++  RA_op = (insn >> operand->shift) & operand->bitm; 
++  
++  operand = &powerpc_operands[opcode->operands[1]];
++  RS_op = (insn >> operand->shift) & operand->bitm; 
++  
++  operand = &powerpc_operands[opcode->operands[2]];
++  UI_op = (insn >> operand->shift) & operand->bitm;
++
++  if (strcmp (opcode->name, "xnop") == 0)
++    {
++      sprintf(output_string, "e_xori 0,0,0");
++      n_new_lines = 1;
++    }
++  else if (satisfies_constraint_ksci8(UI_op))
++    {
++      /* e_xori RA, RS, SCLSCI8
++       * where RA -> RA, RS -> RS, UI -> SCLSCI8 */
++      sprintf(output_string, "e_xori %s,%s,%s", literal_operands[RA],
++              literal_operands[RS], literal_operands[UI]);
++      n_new_lines = 1;
++    }
++
++  return n_new_lines;
++}
++
++const struct ppc_translate ppc_booke2vle[] = {
++  {"addi",   translate_addi},
++  {"addic",  translate_addic},
++  {"addic.", translate_addic},
++  {"addis",  translate_addis},
++  {"andi.",  translate_andi_dot},
++  {"andis.", translate_andis_dot},
++  {"b",      translate_b},
++  {"bc",     translate_bc},
++  {"bc+",    translate_bc},
++  {"bc-",    translate_bc},
++  {"bcl",    translate_bcl},
++  {"bcl+",   translate_bcl},
++  {"bcl-",   translate_bcl},
++  {"bctr",   translate_bctr},
++  {"bctrl",  translate_bctr},
++  {"bdnl",   translate_bcl},
++  {"bdnzl",  translate_bcl},
++  {"bdz",    translate_bc},
++  {"bdzl",   translate_bcl},
++  {"beq",    translate_bc},
++  {"beq+",   translate_bc},
++  {"beq-",   translate_bc},
++  {"beql",   translate_bcl},
++  {"beql+",  translate_bcl},
++  {"beql-",  translate_bcl},
++  {"bf",     translate_bc},
++  {"bfl",    translate_bcl},
++  {"bge",    translate_bc},
++  {"bge+",   translate_bc},
++  {"bge-",   translate_bc},
++  {"bgel",   translate_bcl},
++  {"bgel+",  translate_bcl},
++  {"bgel-",  translate_bcl},
++  {"bgt",    translate_bc},
++  {"bgt+",   translate_bc},
++  {"bgt-",   translate_bc},
++  {"bgtl",   translate_bcl},
++  {"bgtl+",  translate_bcl},
++  {"bgtl-",  translate_bcl},
++  {"bl",     translate_b},
++  {"ble",    translate_bc},
++  {"ble+",   translate_bc},
++  {"ble-",   translate_bc},
++  {"blel",   translate_bcl},
++  {"blel+",  translate_bcl},
++  {"blel-",  translate_bcl},
++  {"blr",    translate_blr},
++  {"blt",    translate_bc},
++  {"blt+",   translate_bc},
++  {"blt-",   translate_bc},
++  {"bltl",   translate_bcl},
++  {"bltl+",  translate_bcl},
++  {"bltl-",  translate_bcl},
++  {"bne",    translate_bc},
++  {"bne+",   translate_bc},
++  {"bne-",   translate_bc},
++  {"bnel",   translate_bcl},
++  {"bnel+",  translate_bcl},
++  {"bnel-",  translate_bcl},
++  {"bng",    translate_bc},
++  {"bng+",   translate_bc},
++  {"bng-",   translate_bc},
++  {"bngl",   translate_bcl},
++  {"bngl+",  translate_bcl},
++  {"bngl-",  translate_bcl},
++  {"bnl",    translate_bc},
++  {"bnl+",   translate_bc},
++  {"bnl-",   translate_bc},
++  {"bnll",   translate_bcl},
++  {"bnll+",  translate_bcl},
++  {"bnll-",  translate_bcl},
++  {"bns",    translate_bc},
++  {"bns+",   translate_bc},
++  {"bns-",   translate_bc},
++  {"bnsl",   translate_bcl},
++  {"bnsl+",  translate_bcl},
++  {"bnsl-",  translate_bcl},
++  {"bnu",    translate_bc},
++  {"bnu+",   translate_bc},
++  {"bnu-",   translate_bc},
++  {"bnul",   translate_bcl},
++  {"bnul+",  translate_bcl},
++  {"bnul-",  translate_bcl},
++  {"brl",    translate_blr},
++  {"bso",    translate_bc},
++  {"bso+",   translate_bc},
++  {"bso-",   translate_bc},
++  {"bsol",   translate_bcl},
++  {"bsol+",  translate_bcl},
++  {"bsol-",  translate_bcl},
++  {"bt",     translate_bc},
++  {"btl",    translate_bcl},
++  {"bun",    translate_bc},
++  {"bun+",   translate_bc},
++  {"bun-",   translate_bc},
++  {"bunl",   translate_bcl},
++  {"bunl+",  translate_bcl},
++  {"bunl-",  translate_bcl},
++  {"clrlwi", translate_rlwinm},
++  {"cmplwi", translate_cmpli},
++  {"cmpli",  translate_cmpli},
++  {"cmpwi",  translate_cmpi},
++  {"cmpi",   translate_cmpi},
++  {"crand",  translate_crxxx},
++  {"crandc", translate_crxxx},
++  {"crclr",  translate_crxxx},
++  {"creqv",  translate_crxxx},
++  {"crmove", translate_crxxx},
++  {"crnand", translate_crxxx},
++  {"crnor",  translate_crxxx},
++  {"crnot",  translate_crxxx},
++  {"cror",   translate_crxxx},
++  {"crorc",  translate_crxxx},
++  {"crset",  translate_crxxx},
++  {"crxor",  translate_crxxx},
++  {"isync",  translate_isync},
++  {"lbz",    translate_lbz},
++  {"lbzu",   translate_lbzu},
++  {"lha",    translate_lha},
++  {"lhau",   translate_lhau},
++  {"lhz",    translate_lhz},
++  {"lhzu",   translate_lhzu},
++  {"li",     translate_li},
++  {"lis",    translate_lis},
++  {"lmw",    translate_lmw},
++  {"lwz",    translate_lwz},
++  {"lwzu",   translate_lwzu},
++  {"mcrf",   translate_mcrf},
++  {"mfdec",  translate_mfdec},
++  {"mr",     translate_mr},
++  {"mtdec",  translate_mtdec},
++  {"mulli",  translate_mulli},
++  {"nop",    translate_nop},
++  {"or",     translate_or},
++  {"ori",    translate_ori},
++  {"oris",   translate_oris},
++  {"rfci",   translate_rfci},
++  {"rfdi",   translate_rfdi},
++  {"rfi",    translate_rfi},
++  {"rfmci",  translate_rfmci},
++  {"rlwimi", translate_rlwimi},
++  {"rlwinm", translate_rlwinm},
++  {"rlwnm",  translate_rlwnm},
++  {"rotlw",  translate_rlwnm},
++  {"rotlw.", translate_rlwnm},
++  {"rotlwi", translate_rlwinm},
++  {"sc",     translate_sc},
++  {"stb",    translate_stb},
++  {"stbu",   translate_stbu},
++  {"sth",    translate_sth},
++  {"sthu",   translate_sthu},
++  {"stmw",   translate_stmw},
++  {"stw",    translate_stw},
++  {"stwu",   translate_stwu},
++  {"subi",   translate_subi},
++  {"subic",  translate_subic},  
++  {"subic.", translate_subic},
++  {"subis",  translate_subis},
++  {"subfic", translate_subfic},
++  {"xnop",   translate_xori},
++  {"xori",   translate_xori},
++};
++const int ppc_num_booke2vle =
++  sizeof (ppc_booke2vle) / sizeof (ppc_booke2vle[0]);
++
++
+ /* Macros used to form opcodes.  */
+ 
+ /* The main opcode.  */

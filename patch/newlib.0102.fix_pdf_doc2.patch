@@ -1,0 +1,39 @@
+Hi,
+
+make pdf on Ubuntu 16.04 fail with:
+
+newlib/libc/libc.texinfo:9: Missing @endcsname inserted.
+
+After a lot of fiddling the reason appears to be the combination of concept and function index despite a lack of concept index entries. Arguably texinfo should not error in that case but here we are, newlib will fail to build its documentation on some systems because of this. Since libc.texinfo only contains function index entries this patch simply removes the combination of indices. It does the same for libm.texinfo which has concept index entries but no function index entries.
+
+Tested by running make pdf, make dvi, make info and make html successfully. libc.pdf appears to have only one index as expected.
+
+
+== Proposed commit message ==
+
+Fix pdf build failure with texinfo 6.1.0 as provided in Ubuntu 16.04. Index combination in libc.texinfo and libm.texinfo fails because both file have only one type of index entries. Removing index combination is thus harmless and solves the problem.
+
+
+
+diff --git a/newlib/libc/libc.texinfo b/newlib/libc/libc.texinfo
+index 6216c9929f0118ac7fad222157b76cbdcdbb6e63..482b0ede84e562c1419587faeddaf92128ba2a46 100644
+--- a/newlib/libc/libc.texinfo
++++ b/newlib/libc/libc.texinfo
+@@ -1,6 +1,5 @@
+ \input texinfo.tex
+ @setfilename libc.info
+-@syncodeindex fn cp
+ 
+ @ifinfo
+ @format
+diff --git a/newlib/libm/libm.texinfo b/newlib/libm/libm.texinfo
+index 5c28975faa8ed82bdaebf1705000c6b802492e25..1b5be1f6c5e4f7c3f3b8a5af1d2eb50ff812cc64 100644
+--- a/newlib/libm/libm.texinfo
++++ b/newlib/libm/libm.texinfo
+@@ -1,6 +1,5 @@
+ \input texinfo.tex
+ @setfilename libm.info
+-@syncodeindex fn cp
+ 
+ @ifinfo
+ @format

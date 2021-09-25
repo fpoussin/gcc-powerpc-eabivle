@@ -1,0 +1,111 @@
+diff --git a/gcc/config/rs6000/rs6000.md b/gcc/config/rs6000/rs6000.md
+index 2aa460c..ab42fe2 100644
+--- a/gcc/config/rs6000/rs6000.md
++++ b/gcc/config/rs6000/rs6000.md
+@@ -6158,32 +6158,32 @@
+ ;; change the mode underneath our feet and then gets confused trying
+ ;; to reload the value.
+ (define_insn "isel_signed_<mode>"
+-  [(set (match_operand:GPR 0 "gpc_reg_operand" "=r,r")
++  [(set (match_operand:GPR 0 "gpc_reg_operand" "=r,r,???r")
+ 	(if_then_else:GPR
+ 	 (match_operator 1 "scc_comparison_operator"
+-			 [(match_operand:CC 4 "cc_reg_operand" "y,y")
++			 [(match_operand:CC 4 "cc_reg_operand" "y,y,y")
+ 			  (const_int 0)])
+-	 (match_operand:GPR 2 "reg_or_cint_operand" "O,b")
+-	 (match_operand:GPR 3 "gpc_reg_operand" "r,r")))]
++	 (match_operand:GPR 2 "reg_or_cint_operand" "O,b,r")
++	 (match_operand:GPR 3 "gpc_reg_operand" "r,r,r")))]
+   "TARGET_ISEL<sel>"
+   "*
+ { return output_isel (operands); }"
+   [(set_attr "type" "isel")
+-   (set_attr "length" "4")])
++   (set_attr "length" "4,4,16")])
+ 
+ (define_insn "isel_unsigned_<mode>"
+-  [(set (match_operand:GPR 0 "gpc_reg_operand" "=r,r")
++  [(set (match_operand:GPR 0 "gpc_reg_operand" "=r,r,???r")
+ 	(if_then_else:GPR
+ 	 (match_operator 1 "scc_comparison_operator"
+-			 [(match_operand:CCUNS 4 "cc_reg_operand" "y,y")
++			 [(match_operand:CCUNS 4 "cc_reg_operand" "y,y,y")
+ 			  (const_int 0)])
+-	 (match_operand:GPR 2 "reg_or_cint_operand" "O,b")
+-	 (match_operand:GPR 3 "gpc_reg_operand" "r,r")))]
++	 (match_operand:GPR 2 "reg_or_cint_operand" "O,b,r")
++	 (match_operand:GPR 3 "gpc_reg_operand" "r,r,r")))]
+   "TARGET_ISEL<sel>"
+   "*
+ { return output_isel (operands); }"
+   [(set_attr "type" "isel")
+-   (set_attr "length" "4")])
++   (set_attr "length" "4,4,16")])
+ 
+ ;; These patterns can be useful for combine; they let combine know that
+ ;; isel can handle reversed comparisons so long as the operands are
+--- gcc-4.9.4/gcc/config/rs6000/rs6000-cpus.def-orig	2017-09-28 12:15:08.208260978 -0500
++++ gcc-4.9.4/gcc/config/rs6000/rs6000-cpus.def	2017-09-28 12:15:21.496260192 -0500
+@@ -59,7 +59,7 @@
+ 
+ #define POWERPC_7400_MASK	(OPTION_MASK_PPC_GFXOPT | OPTION_MASK_ALTIVEC)
+ 
+-#define POWERPC_E200_MASK	(OPTION_MASK_ISEL | OPTION_MASK_VLE)
++#define POWERPC_E200_MASK	(OPTION_MASK_VLE)
+ 
+ /* Deal with ports that do not have -mstrict-align.  */
+ #ifdef OPTION_MASK_STRICT_ALIGN
+--- gcc-4.9.4/gcc/config/rs6000/rs6000.c-orig	2017-09-29 09:30:36.178736065 -0500
++++ gcc-4.9.4/gcc/config/rs6000/rs6000.c	2017-09-29 09:48:55.350671073 -0500
+@@ -21964,9 +21964,39 @@
+       gcc_assert (GET_CODE (operands[2]) == REG
+ 		  && GET_CODE (operands[3]) == REG);
+       PUT_CODE (operands[1], reverse_condition (code));
++      if (GET_CODE (operands[3]) == REG && REGNO(operands[3]) == 0)
++	{
++	  if (TARGET_VLE)
++	    {
++	      if (CR_REGNO4_THRU_7_P(REGNO(operands[1])))
++		{
++		  fatal_error ("VLE target cannot do conditional branch on CR4..CR7");
++		  return "";
++		}
++	      else
++		return "e_bc 1,%j1,$+12\n\tmr %0,%2\n\te_b $+8\n\tmr %0,%3";
++	    }
++	  else
++	    return "bc 12,%j1,$+12\n\tmr %0,%2\n\tb $+8\n\tmr %0,%3";
++	}
+       return "isel %0,%3,%2,%j1";
+     }
+ 
++  if (GET_CODE (operands[2]) == REG && REGNO(operands[2]) == 0)
++    {
++      if (TARGET_VLE)
++	{
++	  if (CR_REGNO4_THRU_7_P(REGNO(operands[1])))
++	    {
++	      fatal_error ("VLE target cannot do conditional branch on CR4..CR7");
++	      return "";
++	    }
++	  else
++	    return "e_bc 1,%j1,$+12\n\tmr %0,%3\n\te_b $+8\n\tmr %0,%2";
++	}
++      else
++	return "bc 12,%j1,$+12\n\tmr %0,%3\n\tb $+8\n\tmr %0,%2";
++    }
+   return "isel %0,%2,%3,%j1";
+ }
+ 
+--- gcc-4.9.4/gcc/config/rs6000/rs6000.md-orig	2017-09-30 12:15:25.447042714 -0500
++++ gcc-4.9.4/gcc/config/rs6000/rs6000.md	2017-09-30 12:16:49.693037733 -0500
+@@ -14297,7 +14297,7 @@
+   [(set (match_operand:SI 0 "gpc_reg_operand" "=r")
+ 	(unspec:SI [(match_operand:CC 1 "cc_reg_operand" "y")]
+ 		   UNSPEC_MV_CR_OV))]
+-  "TARGET_ISEL || TARGET_SPE"
++  "TARGET_ISEL || TARGET_SPE || TARGET_VLE"
+   "mfcr %0\;%^rlwinm %0,%0,%t1,1"
+   [(set_attr "type" "mfcr")
+    (set_attr "length" "8")])

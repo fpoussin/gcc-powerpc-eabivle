@@ -1,0 +1,31 @@
+#Problem Statement
+  Building newlib HTML fails with newer version of texinfo 5.
+  https://sourceware.org/ml/newlib/2014/msg00509.html
+
+diff -Naur newlib-2.2.0/libgloss/doc/porting.texi newlib-2.2.0-html-fix/libgloss/doc/porting.texi
+--- newlib-2.2.0/libgloss/doc/porting.texi      2010-09-23 03:07:47.000000000 -0500
++++ newlib-2.2.0-html-fix/libgloss/doc/porting.texi     2016-01-11 23:28:41.890392186 -0600
+@@ -39,12 +39,14 @@
+ into another language, under the above conditions for modified versions.
+ @end titlepage
+
++@ifnottex
+ @ifinfo
+ @format
+ START-INFO-DIR-ENTRY
+ * Embed with GNU: (porting-).         Embed with GNU
+ END-INFO-DIR-ENTRY
+ @end format
++@end ifinfo
+ Copyright (c) 1993, 1994, 1995 Cygnus Support
+
+ Permission is granted to make and distribute verbatim copies of
+@@ -62,7 +64,7 @@
+ @node Top
+ @top Embed with GNU
+
+-@end ifinfo
++@end ifnottex
+ @strong{Rough Draft}
+
+ The goal of this document is to gather all the information needed to

@@ -1,0 +1,13 @@
+diff --git a/gcc/testsuite/gcc.dg/pr59605.c b/gcc/testsuite/gcc.dg/pr59605.c
+index 5f87c99..b9dc643 100644
+--- a/gcc/testsuite/gcc.dg/pr59605.c
++++ b/gcc/testsuite/gcc.dg/pr59605.c
+@@ -8,6 +8,8 @@ extern void abort (void);
+ #ifndef MAX_COPY
+ #define MAX_COPY (1024 + 8192)
+ #endif
++#undef MAX_COPY
++#define MAX_COPY 1025
+ #define MAX_EXTRA (sizeof (long long))
+ 
+ #define MAX_LENGTH (MAX_OFFSET + MAX_COPY + MAX_EXTRA)

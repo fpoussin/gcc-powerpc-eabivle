@@ -1,0 +1,110 @@
+diff -ruN gcc_DT/gcc/genemit.c gcc-4.9.2-vle/gcc/genemit.c
+--- gcc_DT/gcc/genemit.c	2017-01-06 14:45:37.532762404 -0600
++++ gcc-4.9.2-vle/gcc/genemit.c	2016-12-22 10:52:29.000000000 -0600
+@@ -461,6 +461,7 @@
+ 	 is generated.  */
+       print_md_ptr_loc (XSTR (expand, 3));
+       printf ("%s\n", XSTR (expand, 3));
++      puts("LINE");
+ 
+       /* Output code to copy the arguments back out of `operands'
+ 	 (unless we aren't going to use them at all).  */
+@@ -586,6 +587,7 @@
+     {
+       print_md_ptr_loc (XSTR (split, 3));
+       printf ("%s\n", XSTR (split, 3));
++      puts("LINE");
+     }
+ 
+   /* Output code to copy the arguments back out of `operands'  */
+diff -ruN gcc_DT/gcc/genoutput.c gcc-4.9.2-vle/gcc/genoutput.c
+--- gcc_DT/gcc/genoutput.c	2017-01-06 14:45:37.534762404 -0600
++++ gcc-4.9.2-vle/gcc/genoutput.c	2016-12-22 10:52:29.000000000 -0600
+@@ -657,6 +657,7 @@
+       puts ("{");
+       print_md_ptr_loc (template_code);
+       puts (template_code + 1);
++      puts ("LINE");
+       puts ("}");
+     }
+ 
+diff -ruN gcc_DT/gcc/genpreds.c gcc-4.9.2-vle/gcc/genpreds.c
+--- gcc_DT/gcc/genpreds.c	2017-01-06 14:45:37.334762407 -0600
++++ gcc-4.9.2-vle/gcc/genpreds.c	2016-12-22 10:52:29.000000000 -0600
+@@ -158,7 +158,7 @@
+     fputs (p->c_block, stdout);
+   else
+     printf ("{\n  %s\n}", p->c_block);
+-  fputs ("\n\n", stdout);
++  fputs ("\nLINE\n\n", stdout);
+ }
+ 
+ /* Given a predicate expression EXP, from form NAME, determine whether
+@@ -598,7 +598,7 @@
+ 
+   fputs ("  return ",stdout);
+   write_predicate_expr (exp);
+-  fputs (";\n", stdout);
++  fputs (";\nLINE\n", stdout);
+ }
+ 
+ /* Given a predicate, write out a complete C function to compute it.  */
+@@ -1140,7 +1140,7 @@
+ 	   we know at this point that we have a const_int, so we need not
+ 	   bother with that part of the test.  */
+ 	write_predicate_expr (XEXP (c->exp, 1));
+-	fputs (";\n\n", stdout);
++	fputs (";\nLINE\n\n", stdout);
+       }
+ 
+   puts ("    default: break;\n"
+diff -ruN gcc_DT/gcc/genrecog.c gcc-4.9.2-vle/gcc/genrecog.c
+--- gcc_DT/gcc/genrecog.c	2017-01-06 14:45:55.010762097 -0600
++++ gcc-4.9.2-vle/gcc/genrecog.c	2016-12-22 10:52:29.000000000 -0600
+@@ -1898,6 +1898,7 @@
+ 
+     case DT_c_test:
+       print_c_condition (p->u.c_test);
++      puts("\nLINE");
+       break;
+ 
+     case DT_accept_insn:
+diff -ruN gcc-4.9.2_DT_vle/gcc/Makefile.in gcc-4.9.2-vle/gcc/Makefile.in
+--- gcc-4.9.2_DT_vle/gcc/Makefile.in	2017-01-12 13:28:41.979740070 -0600
++++ gcc-4.9.2-vle/gcc/Makefile.in	2016-12-22 10:52:29.000000000 -0600
+@@ -2068,7 +2069,10 @@
+ $(simple_generated_c): insn-%.c: s-%; @true
+ $(simple_generated_c:insn-%.c=s-%): s-%: build/gen%$(build_exeext)
+ 	$(RUN_GEN) build/gen$*$(build_exeext) $(md_file) \
+-	  $(filter insn-conditions.md,$^) > tmp-$*.c
++	  $(filter insn-conditions.md,$^)  | \
++	  	awk '/^LINE$$/ { print "#line", FNR + 1, "\"'$(objdir)'/insn-'$*'.c\""; next ; } { print ;}' \
++		> tmp-$*.c
++	cp tmp-$*.c copy-insn-$*.c
+ 	$(SHELL) $(srcdir)/../move-if-change tmp-$*.c insn-$*.c
+ 	$(STAMP) s-$*
+ 
+@@ -2152,7 +2156,10 @@
+ 	$(RUN_GEN) build/genmddump$(build_exeext) $(md_file) > tmp-mddump.md
+ 
+ s-preds: $(MD_DEPS) build/genpreds$(build_exeext)
+-	$(RUN_GEN) build/genpreds$(build_exeext) $(md_file) > tmp-preds.c
++	$(RUN_GEN) build/genpreds$(build_exeext) $(md_file) \
++		| awk '/^LINE$$/ { print "#line", FNR + 1, "\"'$(objdir)'/insn-preds.c\""; next ; } { print ;}' \
++		> tmp-preds.c
++	cp tmp-preds.c copy-insn-preds.c
+ 	$(SHELL) $(srcdir)/../move-if-change tmp-preds.c insn-preds.c
+ 	$(STAMP) s-preds
+ 
+@@ -2162,7 +2169,10 @@
+ 	$(STAMP) s-preds-h
+ 
+ s-constrs-h: $(MD_DEPS) build/genpreds$(build_exeext)
+-	$(RUN_GEN) build/genpreds$(build_exeext) -c $(md_file) > tmp-constrs.h
++	$(RUN_GEN) build/genpreds$(build_exeext) -c $(md_file) \
++		| awk '/^LINE$$/ { print "#line", FNR + 1, "\"'$(objdir)'/tm-constrs.h\""; next ; } { print ;}' \
++		> tmp-constrs.h
++	cp tmp-constrs.h copy-tm-constrs.h
+ 	$(SHELL) $(srcdir)/../move-if-change tmp-constrs.h tm-constrs.h
+ 	$(STAMP) s-constrs-h
+ 

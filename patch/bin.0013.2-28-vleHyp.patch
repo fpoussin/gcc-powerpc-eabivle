@@ -1,0 +1,80 @@
+diff --git a/gas/testsuite/gas/ppc/vle.d b/gas/testsuite/gas/ppc/vle.d
+index ea75658..4b98ca7 100644
+--- a/gas/testsuite/gas/ppc/vle.d
++++ b/gas/testsuite/gas/ppc/vle.d
+@@ -130,21 +130,23 @@ Disassembly of section \.text:
+  172:	00 09       	se_rfci
+  174:	00 0a       	se_rfdi
+  176:	00 08       	se_rfi
+- 178:	00 02       	se_sc
+- 17a:	42 65       	se_slw  r5,r6
+- 17c:	6c 77       	se_slwi r7,7
+- 17e:	41 e6       	se_sraw r6,r30
+- 180:	6a 89       	se_srawi r25,8
+- 182:	40 0e       	se_srw  r30,r0
+- 184:	69 9d       	se_srwi r29,25
+- 186:	9a 02       	se_stb  r0,10\(r2\)
+- 188:	b6 1e       	se_sth  r1,12\(r30\)
+- 18a:	d0 7d       	se_stw  r7,0\(r29\)
+- 18c:	06 21       	se_sub  r1,r2
+- 18e:	07 ad       	se_subf r29,r26
+- 190:	25 77       	se_subi r7,24
+-0+0000192 <end_label>:
+- 192:	27 29       	se_subi\. r25,19
+- 194:	e9 c2       	se_bl   118 <middle_label>
+- 196:	79 ff ff 82 	e_b     118 <middle_label>
+- 19a:	79 ff fe 67 	e_bl    0 <start_label>
++ 178:	00 0c       	se_rfgi
++ 17a:	00 02       	se_sc
++ 17c:	7c 00 08 48 	e_sc    1
++ 180:	42 65       	se_slw  r5,r6
++ 182:	6c 77       	se_slwi r7,7
++ 184:	41 e6       	se_sraw r6,r30
++ 186:	6a 89       	se_srawi r25,8
++ 188:	40 0e       	se_srw  r30,r0
++ 18a:	69 9d       	se_srwi r29,25
++ 18c:	9a 02       	se_stb  r0,10\(r2\)
++ 18e:	b6 1e       	se_sth  r1,12\(r30\)
++ 190:	d0 7d       	se_stw  r7,0\(r29\)
++ 192:	06 21       	se_sub  r1,r2
++ 194:	07 ad       	se_subf r29,r26
++ 196:	25 77       	se_subi r7,24
++0+0000198 <end_label>:
++ 198:	27 29       	se_subi\. r25,19
++ 19a:	e9 bf       	se_bl   118 <middle_label>
++ 19c:	79 ff ff 7c 	e_b     118 <middle_label>
++ 1a0:	79 ff fe 61 	e_bl    0 <start_label>
+diff --git a/gas/testsuite/gas/ppc/vle.s b/gas/testsuite/gas/ppc/vle.s
+index cab6120..d1cb6db 100644
+--- a/gas/testsuite/gas/ppc/vle.s
++++ b/gas/testsuite/gas/ppc/vle.s
+@@ -164,7 +164,9 @@ not_end_label:
+ 	se_rfci 
+ 	se_rfdi 
+ 	se_rfi 
++	se_rfgi 
+ 	se_sc 
++	e_sc		1 
+ 	se_slw 		r5,r6
+ 	se_slwi 	r7,7
+ 	se_sraw 	r6,r30
+diff --git a/opcodes/ppc-opc.c b/opcodes/ppc-opc.c
+index 58a899f..f31d16b 100644
+--- a/opcodes/ppc-opc.c
++++ b/opcodes/ppc-opc.c
+@@ -9649,6 +9649,7 @@ const struct powerpc_opcode vle_opcodes[] = {
+ {"se_rfci",	C(9),		C_MASK,		PPCVLE,	0,		{}},
+ {"se_rfdi",	C(10),		C_MASK,		PPCVLE,	0,		{}},
+ {"se_rfmci",	C(11),		C_MASK, PPCRFMCI|PPCVLE, 0,		{}},
++{"se_rfgi",	C(12),		C_MASK,		PPCVLE, 0,		{}},
+ {"se_not",	SE_R(0,2),	SE_R_MASK,	PPCVLE,	0,		{RX}},
+ {"se_neg",	SE_R(0,3),	SE_R_MASK,	PPCVLE,	0,		{RX}},
+ {"se_mflr",	SE_R(0,8),	SE_R_MASK,	PPCVLE,	0,		{RX}},
+@@ -10486,6 +10487,7 @@ const struct powerpc_opcode vle_opcodes[] = {
+ {"e_btl",	EBD15(30,8,BO32T,1), EBD15_MASK, PPCVLE, 0,		{BI32,B15}},
+ 
+ {"e_cmph",	X(31,14),	X_MASK,		PPCVLE,	0,		{CRD, RA, RB}},
++{"e_sc",	X(31,36),	XRTRA_MASK,	PPCVLE,	0,		{ELEV}},
+ {"e_cmphl",	X(31,46),	X_MASK,		PPCVLE,	0,		{CRD, RA, RB}},
+ {"e_crandc",	XL(31,129),	XL_MASK,	PPCVLE,	0,		{BT, BA, BB}},
+ {"e_crnand",	XL(31,225),	XL_MASK,	PPCVLE,	0,		{BT, BA, BB}},
