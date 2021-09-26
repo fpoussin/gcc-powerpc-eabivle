@@ -13,22 +13,23 @@ trap 'echo FAILED COMMAND: $previous_command' EXIT
 #-------------------------------------------------------------------------------------------
 
 TARGET=powerpc-eabivle
-LINUX_ARCH=powerpc
 INSTALL_PATH=~/bin/cross-$TARGET
 CONFIGURATION_OPTIONS="--disable-multilib --disable-threads --disable-shared"
 PARALLEL_MAKE=-j`nproc`
 PATCH_CMD="patch -lbsf -p1"
+WGET="wget -c"
 
 BINUTILS_VERSION=2.28
 GCC_VERSION=4.9.4
+GDB_VERSION=7.8.2
 LINUX_KERNEL_VERSION=3.19
 NEWLIB_VERSION=2.2.0
 MPFR_VERSION=3.0.1
 GMP_VERSION=4.3.2
-#MPC_VERSION=0.9
 MPC_VERSION=1.0.3
 ISL_VERSION=0.12.2
-CLOOG_VERSION=0.18.1
+CLOOG_VERSION=0.18.4
+PYTHON_VERSION=2.7.18
 
 export PATH=$INSTALL_PATH/bin:$PATH
 
@@ -130,42 +131,56 @@ PATCHES="localedef.fix_glibc_2.20 localedef.fix_2.15_CDE \
 #done
 #exit 0
 
-echo Downloading archives...
-pushd archives > /dev/null
-. ./get.sh
-popd
+if [ ! -f archives/.downloaded ]; then
+	echo Downloading archives...
+	pushd archives > /dev/null
+	$WGET https://ftp.gnu.org/gnu/gcc/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.bz2
+	$WGET https://ftp.gnu.org/gnu/gdb/gdb-${GDB_VERSION}.tar.xz
+	$WGET https://ftp.gnu.org/gnu/binutils/binutils-${BINUTILS_VERSION}.tar.bz2
+	$WGET ftp://sourceware.org/pub/newlib/newlib-${NEWLIB_VERSION}.tar.gz
+	$WGET https://ftp.gnu.org/gnu/gmp/gmp-${GMP_VERSION}.tar.bz2
+	$WGET https://ftp.gnu.org/gnu/mpfr/mpfr-${MPFR_VERSION}.tar.bz2
+	$WGET https://ftp.gnu.org/gnu/mpc/mpc-${MPC_VERSION}.tar.gz
+	$WGET https://gcc.gnu.org/pub/gcc/infrastructure/isl-${ISL_VERSION}.tar.bz2
+	$WGET http://www.bastoul.net/cloog/pages/download/cloog-${CLOOG_VERSION}.tar.gz
+	$WGET https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tar.xz
+	touch .downloaded 
+	popd
+fi
 
 pushd extracted > /dev/null
-echo Extracting archives
+echo Clearing old archives
 rm -rf *
+echo Extracting archives
 # Extract everything
 for f in ../archives/*.tar*; do echo $f; tar xf $f; done
 
 echo Patching
-pushd gcc-$GCC_VERSION > /dev/null
+pushd gcc-${GCC_VERSION} > /dev/null
+# Fix some fortran files format (patching will fail otherwise)
 find gcc/testsuite/gfortran.dg -type f -exec dos2unix {} \;
 for p in ../../patch/gcc.*; do echo $p; $PATCH_CMD < $p; done
 popd
 
-pushd newlib-$NEWLIB_VERSION > /dev/null
+pushd newlib-${NEWLIB_VERSION} > /dev/null
 for p in ../../patch/newlib.*; do echo $p; $PATCH_CMD -p1 < $p; done
 popd
 
-pushd binutils-$BINUTILS_VERSION > /dev/null
+pushd binutils-${BINUTILS_VERSION} > /dev/null
 for p in ../../patch/bin.*; do echo $p; $PATCH_CMD -p1 < $p; done
 popd
 
-#pushd gdb-$GDB_VERSION > /dev/null
-#for p in ../../patch/gdb.*; do echo $p; $PATCH_CMD -p1 < $p; done
-#popd
+pushd gdb-${GDB_VERSION} > /dev/null
+for p in ../../patch/gdb.*; do echo $p; $PATCH_CMD -p1 < $p; done
+popd
 
 # Make symbolic links
-cd gcc-$GCC_VERSION
-ln -sf `ls -1d ../mpfr-*/` mpfr
-ln -sf `ls -1d ../gmp-*/` gmp
-ln -sf `ls -1d ../mpc-*/` mpc
-ln -sf `ls -1d ../isl-*/` isl
-ln -sf `ls -1d ../cloog-*/` cloog
+cd gcc-${GCC_VERSION}
+ln -sf `ls -1d ../mpfr-${MPFR_VERSION}` mpfr
+ln -sf `ls -1d ../gmp-${GMP_VERSION}` gmp
+ln -sf `ls -1d ../mpc-${MPC_VERSION}` mpc
+ln -sf `ls -1d ../isl-${ISL_VERSION}` isl
+ln -sf `ls -1d ../cloog-${CLOOG_VERSION}` cloog
 cd ..
 
 popd
@@ -173,23 +188,16 @@ popd
 # Step 1. Binutils
 mkdir -p build-binutils
 cd build-binutils
-../extracted/binutils-$BINUTILS_VERSION/configure --prefix=$INSTALL_PATH --target=$TARGET $CONFIGURATION_OPTIONS
+../extracted/binutils-${BINUTILS_VERSION}/configure --prefix=${INSTALL_PATH} --target=${TARGET} ${CONFIGURATION_OPTIONS}
 make $PARALLEL_MAKE
 make install
 cd ..
-
-# Step 2. Linux Kernel Headers
-#if [ $USE_NEWLIB -eq 0 ]; then
-#    cd $LINUX_KERNEL_VERSION
-#    make ARCH=$LINUX_ARCH INSTALL_HDR_PATH=$INSTALL_PATH/$TARGET headers_install
-#    cd ..
-#fi
 
 # Step 3. C/C++ Compilers
 mkdir -p build-gcc
 cd build-gcc
 NEWLIB_OPTION=--with-newlib
-../extracted/gcc-$GCC_VERSION/configure --prefix=$INSTALL_PATH --target=$TARGET --enable-languages=c,c++ $CONFIGURATION_OPTIONS $NEWLIB_OPTION
+../extracted/gcc-${GCC_VERSION}/configure --prefix=${INSTALL_PATH} --target=${TARGET} --enable-languages=c,c++ ${CONFIGURATION_OPTIONS} ${NEWLIB_OPTION}
 make $PARALLEL_MAKE all-gcc
 make install-gcc
 cd ..
@@ -197,13 +205,29 @@ cd ..
 # Steps 4-6: Newlib
 mkdir -p build-newlib
 cd build-newlib
-../extracted/newlib-$NEWLIB_VERSION/configure --prefix=$INSTALL_PATH --target=$TARGET $CONFIGURATION_OPTIONS
+../extracted/newlib-${NEWLIB_VERSION}/configure --prefix=${INSTALL_PATH} --target=${TARGET} ${CONFIGURATION_OPTIONS}
 make $PARALLEL_MAKE
 make install
 cd ..
 
 # Step 7. Standard C++ Library & the rest of GCC
 cd build-gcc
+make $PARALLEL_MAKE all
+make install
+cd ..
+
+# Step 8. Python
+mkdir -p build-python
+cd build-python
+../extracted/Python-${PYTHON_VERSION}/configure --enable-shared --prefix=${INSTALL_PATH} LDFLAGS="-Wl,--rpath=${INSTALL_PATH}/lib"
+make $PARALLEL_MAKE all
+make install
+cd ..
+
+# Step 9. GDB
+mkdir -p build-gdb
+cd build-gdb
+LDFLAGS="-Wl,-rpath,${INSTALL_PATH}/lib -L${INSTALL_PATH}/lib" ../extracted/gdb-${GDB_VERSION}/configure --prefix=${INSTALL_PATH} --target=${TARGET} --with-python=${INSTALL_PATH}/bin
 make $PARALLEL_MAKE all
 make install
 cd ..
